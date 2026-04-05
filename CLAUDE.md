@@ -26,8 +26,9 @@ Run `gbrain --help` or `gbrain --tools-json` for full command reference.
 
 ## Testing
 
-`bun test` runs all tests. Key test: `test/import.test.ts` validates round-trip
-(import markdown → export → diff against original). This must always pass.
+`bun test` runs all tests. Tests: `test/markdown.test.ts` (frontmatter parsing,
+round-trip serialization), `test/chunkers/recursive.test.ts` (delimiter splitting,
+overlap, chunk sizing). Future: `test/import.test.ts` for full import/export round-trip.
 
 ## Skills
 
