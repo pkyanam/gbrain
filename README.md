@@ -88,7 +88,7 @@ integrations are configured."
 
 ```bash
 bun add -g github:garrytan/gbrain
-gbrain init --supabase          # guided wizard
+gbrain init                     # local brain, ready in 2 seconds
 gbrain import ~/git/brain/      # index your markdown
 gbrain query "what do we know about competitive dynamics?"
 ```
