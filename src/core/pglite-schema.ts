@@ -185,6 +185,13 @@ CREATE TABLE IF NOT EXISTS minion_jobs (
   tokens_input     INTEGER     NOT NULL DEFAULT 0,
   tokens_output    INTEGER     NOT NULL DEFAULT 0,
   tokens_cache_read INTEGER    NOT NULL DEFAULT 0,
+  depth            INTEGER     NOT NULL DEFAULT 0,
+  max_children     INTEGER,
+  timeout_ms       INTEGER,
+  timeout_at       TIMESTAMPTZ,
+  remove_on_complete BOOLEAN   NOT NULL DEFAULT FALSE,
+  remove_on_fail   BOOLEAN     NOT NULL DEFAULT FALSE,
+  idempotency_key  TEXT,
   result           JSONB,
   progress         JSONB,
   error_text       TEXT,
@@ -198,7 +205,10 @@ CREATE TABLE IF NOT EXISTS minion_jobs (
   CONSTRAINT chk_on_child_fail CHECK (on_child_fail IN ('fail_parent','remove_dep','ignore','continue')),
   CONSTRAINT chk_jitter_range CHECK (backoff_jitter >= 0.0 AND backoff_jitter <= 1.0),
   CONSTRAINT chk_attempts_order CHECK (attempts_made <= attempts_started),
-  CONSTRAINT chk_nonnegative CHECK (attempts_made >= 0 AND attempts_started >= 0 AND stalled_counter >= 0 AND max_attempts >= 1 AND max_stalled >= 0)
+  CONSTRAINT chk_nonnegative CHECK (attempts_made >= 0 AND attempts_started >= 0 AND stalled_counter >= 0 AND max_attempts >= 1 AND max_stalled >= 0),
+  CONSTRAINT chk_depth_nonnegative CHECK (depth >= 0),
+  CONSTRAINT chk_max_children_positive CHECK (max_children IS NULL OR max_children > 0),
+  CONSTRAINT chk_timeout_positive CHECK (timeout_ms IS NULL OR timeout_ms > 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_minion_jobs_claim ON minion_jobs (queue, priority ASC, created_at ASC) WHERE status = 'waiting';
@@ -206,6 +216,12 @@ CREATE INDEX IF NOT EXISTS idx_minion_jobs_status ON minion_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_minion_jobs_stalled ON minion_jobs (lock_until) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_minion_jobs_delayed ON minion_jobs (delay_until) WHERE status = 'delayed';
 CREATE INDEX IF NOT EXISTS idx_minion_jobs_parent ON minion_jobs(parent_job_id);
+CREATE INDEX IF NOT EXISTS idx_minion_jobs_timeout ON minion_jobs (timeout_at)
+  WHERE status = 'active' AND timeout_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_minion_jobs_parent_status ON minion_jobs (parent_job_id, status)
+  WHERE parent_job_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_minion_jobs_idempotency ON minion_jobs (idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
 
 -- Inbox table for sidechannel messaging
 CREATE TABLE IF NOT EXISTS minion_inbox (
@@ -217,6 +233,27 @@ CREATE TABLE IF NOT EXISTS minion_inbox (
   read_at     TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_minion_inbox_unread ON minion_inbox (job_id) WHERE read_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_minion_inbox_child_done ON minion_inbox (job_id, sent_at)
+  WHERE (payload->>'type') = 'child_done';
+
+-- Attachment manifest (BYTEA inline + forward-compat storage_uri)
+CREATE TABLE IF NOT EXISTS minion_attachments (
+  id            SERIAL PRIMARY KEY,
+  job_id        INTEGER NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
+  filename      TEXT NOT NULL,
+  content_type  TEXT NOT NULL,
+  content       BYTEA,
+  storage_uri   TEXT,
+  size_bytes    INTEGER NOT NULL,
+  sha256        TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uniq_minion_attachments_job_filename UNIQUE (job_id, filename),
+  CONSTRAINT chk_attachment_storage CHECK (content IS NOT NULL OR storage_uri IS NOT NULL),
+  CONSTRAINT chk_attachment_size CHECK (size_bytes >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_minion_attachments_job ON minion_attachments (job_id);
+-- NOTE: SET STORAGE EXTERNAL is omitted on PGLite; it's a Postgres TOAST optimization
+-- and PGLite may not support it. Postgres path applies it via migration v7.
 
 -- ============================================================
 -- Trigger-based search_vector (spans pages + timeline_entries)
