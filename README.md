@@ -188,6 +188,8 @@ Crash and your work doesn't vanish. Dispatch is 10× faster because the worker s
 
 Full methodology, caveats, and reproduction steps: [`docs/benchmarks/2026-04-18-minions-vs-openclaw-subagents.md`](docs/benchmarks/2026-04-18-minions-vs-openclaw-subagents.md).
 
+**Production data point.** On Wintermute (Render container, Supabase Postgres, 45K-page brain), a Minions pipeline pulled and ingested one month of tweets end-to-end in **753ms for $0.00**. An OpenClaw `sessions_spawn` for the same task hit the **10-second gateway timeout** and never produced output. Full write-up: [`docs/benchmarks/2026-04-18-minions-vs-openclaw-production.md`](docs/benchmarks/2026-04-18-minions-vs-openclaw-production.md).
+
 ### How each pain gets fixed
 
 | Pain | How Minions fixes it |
