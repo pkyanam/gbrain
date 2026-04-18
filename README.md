@@ -261,7 +261,7 @@ gbrain extract links --source db        # wire up the existing 29K pages
 gbrain extract timeline --source db     # extract dated events from markdown timelines
 ```
 
-Then ask graph questions or watch the search ranking improve. Benchmarked: **94% link recall, 94% type accuracy, 100% relational recall** on a synthetic 80-page graph. See [docs/benchmarks/2026-04-18-graph-quality.md](docs/benchmarks/2026-04-18-graph-quality.md).
+Then ask graph questions or watch the search ranking improve. Benchmarked: **Recall@5 jumps from 83% to 95%, Precision@5 from 39% to 45%, +30 more correct answers in the agent's top-5 reads** on a 240-page Opus-generated rich-prose corpus. Graph-only F1 hits 86.6% vs grep's 57.8% (+28.8 pts). See [docs/benchmarks/2026-04-18-brainbench-v1.md](docs/benchmarks/2026-04-18-brainbench-v1.md).
 
 ## Search
 
@@ -406,8 +406,7 @@ The skills in this repo are those patterns, generalized. What took 11 days to bu
 - [CHANGELOG.md](CHANGELOG.md) ... Version history
 
 **Benchmarks:**
-- [Search Quality (PR #64)](docs/benchmarks/2026-04-14-search-quality.md) ... compiled truth boost + intent classifier
-- [Graph Quality (PR #188)](docs/benchmarks/2026-04-18-graph-quality.md) ... auto-link + typed inference + relational queries
+- [BrainBench v1 (PR #188)](docs/benchmarks/2026-04-18-brainbench-v1.md) ... single comprehensive before/after report on a 240-page Opus-generated corpus. 7 categories: relational queries, identity resolution, temporal queries, performance, robustness, MCP contract.
 
 ## Contributing
 
