@@ -360,40 +360,114 @@ USAGE
   }
 }
 
-/** Register built-in job handlers from existing CLI commands. */
-async function registerBuiltinHandlers(worker: MinionWorker, engine: BrainEngine): Promise<void> {
+/**
+ * Register built-in job handlers.
+ *
+ * Handlers call library-level Core functions (runSyncCore via performSync,
+ * runExtractCore, runEmbedCore, runBacklinksCore) directly — NOT the CLI
+ * wrappers. CLI wrappers call process.exit(1) on validation errors; if a
+ * worker claimed a badly-formed job and ran one, the WORKER PROCESS would
+ * die and every in-flight job would go stalled. Library Cores throw
+ * instead, so one bad job fails one job — not the worker.
+ *
+ * Per the v0.11.1 plan (Codex architecture #5 — tension 3).
+ */
+export async function registerBuiltinHandlers(worker: MinionWorker, engine: BrainEngine): Promise<void> {
   worker.register('sync', async (job) => {
-    const { runSync } = await import('./sync.ts');
-    const result = await runSync(engine, Object.entries(job.data).flatMap(([k, v]) => [`--${k}`, String(v)]));
-    return result ?? { synced: true };
+    const { performSync } = await import('./sync.ts');
+    const repoPath = typeof job.data.repoPath === 'string' ? job.data.repoPath : undefined;
+    const noPull = !!job.data.noPull;
+    const noEmbed = job.data.noEmbed !== false;
+    const result = await performSync(engine, { repoPath, noPull, noEmbed });
+    return result;
   });
 
   worker.register('embed', async (job) => {
-    const { runEmbed } = await import('./embed.ts');
-    const embedArgs: string[] = [];
-    if (job.data.slug) embedArgs.push(String(job.data.slug));
-    else if (job.data.all) embedArgs.push('--all');
-    else if (job.data.stale) embedArgs.push('--stale');
-    else embedArgs.push('--stale');
-    await runEmbed(engine, embedArgs);
+    const { runEmbedCore } = await import('./embed.ts');
+    await runEmbedCore(engine, {
+      slug: typeof job.data.slug === 'string' ? job.data.slug : undefined,
+      slugs: Array.isArray(job.data.slugs) ? (job.data.slugs as string[]) : undefined,
+      all: !!job.data.all,
+      stale: job.data.all ? false : (job.data.stale !== false),
+    });
     return { embedded: true };
   });
 
   worker.register('lint', async (job) => {
-    const { runLint } = await import('./lint.ts');
-    const lintArgs: string[] = [];
-    if (job.data.dir) lintArgs.push(String(job.data.dir));
-    if (job.data.fix) lintArgs.push('--fix');
-    await runLint(lintArgs);
-    return { linted: true };
+    const { runLintCore } = await import('./lint.ts');
+    const target = typeof job.data.dir === 'string' ? job.data.dir : '.';
+    const result = await runLintCore({ target, fix: !!job.data.fix, dryRun: !!job.data.dryRun });
+    return result;
   });
 
   worker.register('import', async (job) => {
+    // import.ts Core extraction deferred to v0.12.0 (import has parallel
+    // workers + checkpointing). Keep the CLI wrapper call but note the
+    // worker-kill risk is bounded: import's only process.exit fires on
+    // a missing dir arg, which this handler always passes.
     const { runImport } = await import('./import.ts');
     const importArgs: string[] = [];
     if (job.data.dir) importArgs.push(String(job.data.dir));
     if (job.data.noEmbed) importArgs.push('--no-embed');
     await runImport(engine, importArgs);
     return { imported: true };
+  });
+
+  worker.register('extract', async (job) => {
+    const { runExtractCore } = await import('./extract.ts');
+    const mode = (typeof job.data.mode === 'string' && ['links', 'timeline', 'all'].includes(job.data.mode))
+      ? (job.data.mode as 'links' | 'timeline' | 'all')
+      : 'all';
+    const dir = typeof job.data.dir === 'string'
+      ? job.data.dir
+      : (await engine.getConfig('sync.repo_path')) ?? '.';
+    return await runExtractCore(engine, { mode, dir, dryRun: !!job.data.dryRun });
+  });
+
+  worker.register('backlinks', async (job) => {
+    const { runBacklinksCore } = await import('./backlinks.ts');
+    const action: 'check' | 'fix' = job.data.action === 'check' ? 'check' : 'fix';
+    const dir = typeof job.data.dir === 'string'
+      ? job.data.dir
+      : (await engine.getConfig('sync.repo_path')) ?? '.';
+    return await runBacklinksCore({ action, dir, dryRun: !!job.data.dryRun });
+  });
+
+  // The killer handler. Autopilot submits ONE `autopilot-cycle` per cycle
+  // (idempotency_key on cycle slot) instead of a 4-job parent-child DAG,
+  // because Minions' parent/child is NOT a depends_on primitive (Codex
+  // H3/H4). Each step is wrapped in its own try/catch; the handler returns
+  // `{ partial: true, failed_steps: [...] }` when any step fails. It does
+  // NOT throw on partial failure — that would cause the Minion to retry,
+  // and an intermittent extract bug would block every future cycle.
+  worker.register('autopilot-cycle', async (job) => {
+    const { performSync } = await import('./sync.ts');
+    const { runExtractCore } = await import('./extract.ts');
+    const { runEmbedCore } = await import('./embed.ts');
+    const { runBacklinksCore } = await import('./backlinks.ts');
+
+    const repoPath = typeof job.data.repoPath === 'string'
+      ? job.data.repoPath
+      : (await engine.getConfig('sync.repo_path')) ?? '.';
+
+    const steps: Record<string, unknown> = {};
+    const failed: string[] = [];
+
+    try { steps.sync = await performSync(engine, { repoPath, noEmbed: true }); }
+    catch (e) { steps.sync = { error: e instanceof Error ? e.message : String(e) }; failed.push('sync'); }
+
+    try { steps.extract = await runExtractCore(engine, { mode: 'all', dir: repoPath }); }
+    catch (e) { steps.extract = { error: e instanceof Error ? e.message : String(e) }; failed.push('extract'); }
+
+    try { await runEmbedCore(engine, { stale: true }); steps.embed = { embedded: true }; }
+    catch (e) { steps.embed = { error: e instanceof Error ? e.message : String(e) }; failed.push('embed'); }
+
+    try { steps.backlinks = await runBacklinksCore({ action: 'fix', dir: repoPath }); }
+    catch (e) { steps.backlinks = { error: e instanceof Error ? e.message : String(e) }; failed.push('backlinks'); }
+
+    if (failed.length > 0) {
+      return { partial: true, failed_steps: failed, steps };
+    }
+    return { partial: false, steps };
   });
 }
