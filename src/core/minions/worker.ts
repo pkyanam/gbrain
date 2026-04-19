@@ -191,16 +191,30 @@ export class MinionWorker {
   private async handleQuietHoursDefer(job: MinionJob, lockToken: string, verdict: 'skip' | 'defer'): Promise<void> {
     try {
       if (verdict === 'skip') {
+        // Route through MinionQueue.cancelJob so parent jobs in waiting-children
+        // see the cancellation and roll up correctly. A direct status='cancelled'
+        // UPDATE strands parents forever (no inbox, no dependency resolution).
+        // Release our lock first so cancelJob's descendant walk sees a clean state.
         await this.engine.executeRaw(
-          `UPDATE minion_jobs
-           SET status = 'cancelled', lock_token = NULL, lock_until = NULL,
-               error_text = 'skipped_quiet_hours', updated_at = now()
+          `UPDATE minion_jobs SET lock_token = NULL, lock_until = NULL, updated_at = now()
            WHERE id = $1 AND lock_token = $2`,
           [job.id, lockToken],
         );
+        try {
+          await this.queue.cancelJob(job.id);
+        } catch {
+          // cancelJob best-effort — if the parent rollup path errors, we still
+          // want the job out of 'active' rather than re-claimed on next tick.
+          await this.engine.executeRaw(
+            `UPDATE minion_jobs
+             SET status = 'cancelled', error_text = 'skipped_quiet_hours', updated_at = now()
+             WHERE id = $1 AND status NOT IN ('completed','failed','dead')`,
+            [job.id],
+          );
+        }
         console.log(`Quiet-hours skip: ${job.name} (id=${job.id})`);
       } else {
-        // Defer: release back to waiting, push delay ~15 minutes to avoid
+        // Defer: release back to delayed, push delay ~15 minutes to avoid
         // immediate re-claim loops when the claim query re-runs.
         await this.engine.executeRaw(
           `UPDATE minion_jobs
