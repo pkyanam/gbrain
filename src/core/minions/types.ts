@@ -106,6 +106,14 @@ export interface MinionJobInput {
   delay?: number; // ms delay before eligible
   parent_job_id?: number;
   on_child_fail?: ChildFailPolicy;
+  /**
+   * Per-job override for how many stalls are tolerated before the queue
+   * dead-letters the job. Column default is 1 (first stall → dead), which
+   * defeats crash recovery for long-running handlers (LLM loops, etc.). For
+   * anything that should survive a mid-run worker kill, set max_stalled: 3+.
+   * v0.15+.
+   */
+  max_stalled?: number;
 
   // v7: subagent + parity
   /** Cap on live (non-terminal) children of THIS job. NULL/undefined = unlimited. */
@@ -202,14 +210,37 @@ export function rowToInboxMessage(row: Record<string, unknown>): InboxMessage {
   };
 }
 
-// --- Child-done inbox message (auto-posted on completeJob) ---
+// --- Child-done inbox message (auto-posted on every terminal transition) ---
 
-/** Posted into the parent's inbox when a child completes successfully. */
+/**
+ * Posted into the parent's inbox when a child reaches a terminal state.
+ *
+ * Pre-v0.15: only success paths (completeJob) emitted this. Failed/dead/
+ * cancelled children produced no payload, which stranded aggregator-style
+ * parents that needed to wait for N children regardless of outcome.
+ *
+ * v0.15: failJob, cancelJob, and handleTimeouts also emit child_done with
+ * the appropriate `outcome`, so the aggregator handler can count "N children
+ * resolved" without worrying about which rail each one took.
+ *
+ * Backwards compatible: old ChildDoneMessage consumers only read child_id,
+ * job_name, and result (non-null on success). Outcome and error are additive.
+ */
+export type ChildOutcome = 'complete' | 'failed' | 'dead' | 'cancelled' | 'timeout';
+
 export interface ChildDoneMessage {
   type: 'child_done';
   child_id: number;
   job_name: string;
   result: unknown;
+  /**
+   * Terminal outcome. When absent (from a pre-v0.15 writer that didn't set
+   * it), consumers should treat the message as 'complete' — the legacy writer
+   * only emitted on success paths.
+   */
+  outcome?: ChildOutcome;
+  /** Set when outcome !== 'complete'. Mirrors minion_jobs.error_text. */
+  error?: string | null;
 }
 
 // --- Attachments (v7) ---
