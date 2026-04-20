@@ -1,5 +1,7 @@
 import { describe, test, expect } from 'bun:test';
-import { parseGlobalFlags, cliOptsToProgressOptions, DEFAULT_CLI_OPTIONS } from '../src/core/cli-options.ts';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { parseGlobalFlags, cliOptsToProgressOptions, DEFAULT_CLI_OPTIONS, setCliOptions, getCliOptions, _resetCliOptionsForTest } from '../src/core/cli-options.ts';
 
 describe('parseGlobalFlags', () => {
   test('empty argv → defaults, empty rest', () => {
@@ -62,6 +64,42 @@ describe('parseGlobalFlags', () => {
     const r = parseGlobalFlags(['--quiet', '--progress-json', '--progress-interval=250', 'sync']);
     expect(r.cliOpts).toEqual({ quiet: true, progressJson: true, progressInterval: 250 });
     expect(r.rest).toEqual(['sync']);
+  });
+});
+
+describe('getCliOptions / setCliOptions singleton', () => {
+  test('defaults when never set', () => {
+    _resetCliOptionsForTest();
+    expect(getCliOptions()).toEqual(DEFAULT_CLI_OPTIONS);
+  });
+
+  test('setCliOptions applies + getCliOptions returns a copy', () => {
+    _resetCliOptionsForTest();
+    setCliOptions({ quiet: false, progressJson: true, progressInterval: 250 });
+    expect(getCliOptions().progressJson).toBe(true);
+    expect(getCliOptions().progressInterval).toBe(250);
+  });
+});
+
+describe('cli.ts global-flag stripping (integration)', () => {
+  const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
+
+  test('gbrain --progress-json --version works (global flag stripped before dispatch)', () => {
+    const res = spawnSync('bun', [CLI, '--progress-json', '--version'], {
+      encoding: 'utf-8',
+      env: { ...process.env, NO_COLOR: '1' },
+    });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain('gbrain ');
+  });
+
+  test('gbrain --quiet --progress-interval=500 version works (flags interleaved, all stripped)', () => {
+    const res = spawnSync('bun', [CLI, '--quiet', '--progress-interval=500', 'version'], {
+      encoding: 'utf-8',
+      env: { ...process.env, NO_COLOR: '1' },
+    });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain('gbrain ');
   });
 });
 

@@ -100,3 +100,27 @@ export function cliOptsToProgressOptions(cliOpts: CliOptions): ProgressOptions {
   if (cliOpts.progressJson) return { mode: 'json', minIntervalMs: cliOpts.progressInterval };
   return { mode: 'auto', minIntervalMs: cliOpts.progressInterval };
 }
+
+// ---------------------------------------------------------------------------
+// Module-level singleton (set once by cli.ts after parsing global flags; read
+// by any bulk command that wants to construct a reporter). Same pattern as
+// Commander's `program.opts()`. Also threaded into OperationContext for
+// shared ops that run under the MCP server (which sets its own defaults).
+// ---------------------------------------------------------------------------
+
+let activeCliOptions: CliOptions = { ...DEFAULT_CLI_OPTIONS };
+
+export function setCliOptions(opts: CliOptions): void {
+  activeCliOptions = { ...opts };
+}
+
+export function getCliOptions(): CliOptions {
+  return activeCliOptions;
+}
+
+/**
+ * Reset singleton to defaults. Only used by tests.
+ */
+export function _resetCliOptionsForTest(): void {
+  activeCliOptions = { ...DEFAULT_CLI_OPTIONS };
+}
