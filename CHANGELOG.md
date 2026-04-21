@@ -2,22 +2,22 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.14.2] - 2026-04-20
+## [0.14.3] - 2026-04-20
 
 ## **Fix wave: 4 hot issues that blocked real brains, landed together.**
 ## **PGLite survives macOS 26.3. Minions actually rescues SIGKILL'd jobs. Autopilot dashboards stop the 14.6s seqscan. `bun install -g` tells you when it's broken.**
 
-v0.13.0 shipped a lot of capability and a lot of edge cases that only surface on production brains. v0.14.2 is the hotfix wave on top of v0.14.0 (shell job type) + v0.14.1 (doctor DRY + `--fix`): four user-filed issues against v0.13.x, fixed and verified together, plus three scope expansions that close adjacent footguns. Upgrade is automatic. If `gbrain upgrade` runs clean, your brain gets faster and more reliable on the next sync cycle.
+v0.13.0 shipped a lot of capability and a lot of edge cases that only surface on production brains. v0.14.3 is the hotfix wave on top of v0.14.0 (shell job type) + v0.14.1 (doctor DRY + `--fix`) + v0.14.2 (8 deferred bug fixes): four user-filed issues against v0.13.x, fixed and verified together, plus three scope expansions that close adjacent footguns. Upgrade is automatic. If `gbrain upgrade` runs clean, your brain gets faster and more reliable on the next sync cycle.
 
 ### The numbers that matter
 
 The four issues this release closes, with measured impact:
 
-| Issue | Before v0.14.2 | After v0.14.2 | Δ |
+| Issue | Before v0.14.3 | After v0.14.3 | Δ |
 |-------|----------------|----------------|---|
 | #170 `SELECT * FROM pages ORDER BY updated_at DESC` on 31k rows (Postgres) | ~14.6s seqscan | <20ms index scan | ~700x |
-| #219 `max_stalled` default on `minion_jobs` | 1 (first stall → dead) | 5 (four rescues before dead) | claim matches the docs |
-| #219 existing waiting/active jobs with `max_stalled=1` | will still dead-letter | backfilled to 5 on upgrade | closes the pain today |
+| #219 `max_stalled` default on `minion_jobs` | 3 (three rescues before dead, v0.14.2 set this) | 5 (four rescues before dead) | extra headroom for flaky deploys |
+| #219 existing waiting/active jobs with `max_stalled<5` | would still dead-letter earlier than expected | backfilled to 5 on upgrade | closes the pain today |
 | #218 `bun install -g github:garrytan/gbrain` postinstall failure | silent `|| true` | visible stderr warning with recovery URL | users know it's broken |
 | #223 PGLite WASM crash on macOS 26.3 | raw `Aborted()`, no hint | pinned `@electric-sql/pglite` to `0.4.3` + actionable error message naming the issue | users can route to #223 |
 
@@ -25,13 +25,13 @@ The four issues this release closes, with measured impact:
 
 If you run autopilot against a Supabase brain with 30k+ pages, your health/dashboard cycle was silently burning 14.6 seconds on every iteration. The new index drops that to single-digit milliseconds without locking writes (Postgres gets `CREATE INDEX CONCURRENTLY` with an invalid-index cleanup DO block; PGLite gets plain `CREATE INDEX` since it has no concurrent writers). Your agent stops blocking on list-pages-by-date queries.
 
-If you use Minions, the "SIGKILL mid-flight, 10/10 rescued" claim is now actually true out-of-the-box. Default `max_stalled=5` means a kill -9'd worker gets picked up by the next worker instead of dead-lettered on first stall. v15 migration backfills existing non-terminal rows (`waiting/active/delayed/waiting-children/paused`) so upgrading doesn't leave a queue full of doomed jobs.
+If you use Minions, the "SIGKILL mid-flight, 10/10 rescued" claim is now actually true out-of-the-box with generous headroom. Default `max_stalled=5` means a kill -9'd worker gets picked up by the next worker instead of dead-lettered early. v15 migration backfills existing non-terminal rows (`waiting/active/delayed/waiting-children/paused`) so upgrading doesn't leave a queue full of doomed jobs.
 
 If you install via `bun install -g github:...` (not recommended but people try it), you'll now see a loud stderr warning with a link to #218 instead of a broken CLI that fails on next invocation. The real fix is `git clone + bun link`, documented in README and INSTALL_FOR_AGENTS.md.
 
 If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4.3 gives us the best shot at avoiding the WASM regression (noting: 0.4.3 is unverified against 26.3 in CI — the error-wrap at `pglite-engine.ts connect()` is the safety net if the pin doesn't hold). Any PGLite init failure now shows the #223 link instead of a raw runtime error.
 
-## To take advantage of v0.14.2
+## To take advantage of v0.14.3
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
@@ -51,11 +51,11 @@ If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4
 
 #### Added
 - Schema migration **v14** — `CREATE INDEX [CONCURRENTLY] IF NOT EXISTS idx_pages_updated_at_desc ON pages (updated_at DESC)` (engine-aware; Postgres uses CONCURRENTLY with an invalid-index DO-block cleanup, PGLite uses plain CREATE). Closes #170. Contributed by @fuleinist (#215).
-- Schema migration **v15** — `ALTER TABLE minion_jobs ALTER COLUMN max_stalled SET DEFAULT 5` + `UPDATE` backfill scoped to non-terminal statuses. Closes #219. Reported by @macbotmini-eng.
+- Schema migration **v15** — `ALTER TABLE minion_jobs ALTER COLUMN max_stalled SET DEFAULT 5` (bumps v0.14.2's default of 3 to 5 for extra flaky-deploy headroom) + `UPDATE` backfill scoped to non-terminal statuses (`waiting/active/delayed/waiting-children/paused`) so existing queued work benefits on upgrade. Closes #219. Reported by @macbotmini-eng.
 - `MinionJobInput.max_stalled` — new optional field, plumbed through `queue.add()` with `[1, 100]` clamp.
 - `gbrain jobs submit --max-stalled N` — CLI flag to set per-job stall tolerance.
 - `gbrain jobs submit --backoff-type`, `--backoff-delay`, `--backoff-jitter`, `--timeout-ms`, `--idempotency-key` — scope-expansion audit exposing existing `MinionJobInput` fields as first-class CLI flags.
-- `gbrain jobs smoke --sigkill-rescue` — opt-in regression smoke case that simulates a killed worker and asserts the v0.14.2 default actually rescues.
+- `gbrain jobs smoke --sigkill-rescue` — opt-in regression smoke case that simulates a killed worker and asserts the v0.14.3 default actually rescues.
 - `gbrain doctor --index-audit` — new opt-in Postgres check that reports zero-scan indexes from `pg_stat_user_indexes`. Informational only (no auto-drop). PGLite no-ops.
 - `BrainEngine.kind` readonly discriminator (`'postgres' | 'pglite'`) — lets migrations and consumers branch on engine without `instanceof` + dynamic imports.
 - `package.json trustedDependencies: ["@electric-sql/pglite"]` — lets Bun run PGLite's dep postinstall on global installs.
@@ -68,7 +68,7 @@ If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4
 - `README.md` + `INSTALL_FOR_AGENTS.md` — explicit warning against `bun install -g github:garrytan/gbrain`.
 
 #### Fixed
-- **The "SIGKILL mid-flight, 10/10 rescued" claim is now accurate** out-of-the-box (#219). Schema default bumped from 1 → 5.
+- **The "SIGKILL mid-flight, 10/10 rescued" claim is now accurate** out-of-the-box with headroom (#219). Schema default 3 → 5.
 - **Autopilot dashboards stop blocking on list-pages queries** on 30k+ row Postgres brains (#170).
 - **PGLite error on macOS 26.3** is now actionable instead of a raw `Aborted()` (#223).
 - **`bun install -g` no longer produces a silently broken CLI** (#218) — postinstall surfaces failures.
@@ -77,7 +77,83 @@ If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4
 - `Migration` interface extended with `sqlFor: { postgres?, pglite? }` + `transaction: boolean` fields. Runner picks the engine-specific SQL branch and (on Postgres only) bypasses `engine.transaction()` when `transaction: false` (required for CONCURRENTLY).
 - `scripts/check-jsonb-pattern.sh` extended with a CI guard against `max_stalled DEFAULT 1` regressing.
 - ~15 new unit tests covering max_stalled default/clamp/backfill/v14/v15 semantics. 3 regression tests pinned by IRON RULE.
-- Full E2E suite green against Postgres 16 + pgvector.
+- `test/e2e/` now runs test files sequentially via `scripts/run-e2e.sh` to eliminate shared-DB races that caused ~3/5 runs to have 4-10 flaky fails. Every run post-fix: 13 files, 138 tests, 0 fails.
+
+## [0.14.2] - 2026-04-20
+
+## **Eight deferred bugs, root-cause fixes, one clean wave.**
+## **Sync stops losing files. Migrations stop retrying forever. Pooler users get a knob.**
+
+Eight bugs were previously scoped out of a PR after Codex review caught wrong root causes and unimplementable architectures. v0.14.2 takes each back to the actual code and fixes the structural gap. `/plan-eng-review` + `/codex consult` verified every load-bearing claim before a single line of code ran (20 findings, 12 triggered plan revisions before implementation).
+
+The practical wins for a busy brain: `gbrain sync` no longer silently loses files with unquoted-colon YAML titles across any of the three sync paths. `gbrain upgrade` can't get stuck in an infinite retry loop on a wedged migration (3-partial cap + `--force-retry` escape hatch). Supabase pooler users have `GBRAIN_POOL_SIZE` to throttle without touching schemas. `gbrain doctor --fast` tells you WHY it's skipping DB checks instead of lying about no database being configured. `brain_score` gets a breakdown so 79/100 tells you which component is costing you the 21 points.
+
+### The numbers that matter
+
+Measured on this branch's diff against origin/master:
+
+| Metric                                            | BEFORE v0.14.2      | AFTER v0.14.2              | Δ                       |
+|---------------------------------------------------|---------------------|-----------------------------|-------------------------|
+| Sync paths that silently drop files on YAML break | 3 of 3              | 0 of 3                      | **no more silent loss** |
+| Wedged-migration retry loops                      | infinite            | 3-partial cap + `--force-retry` | bounded              |
+| Pool-size knob for Supabase pooler                | none                | `GBRAIN_POOL_SIZE` env      | **first-class knob**    |
+| `doctor --fast` messages                          | 1 catch-all         | 3 source-specific           | honest signal           |
+| `brain_score` observability                       | one number          | 5-field breakdown (sum == total) | diagnosable         |
+| Duplicate edges in `gbrain graph` output          | leaked per-origin   | deduped at presentation      | schema preserved        |
+| `minion_jobs.max_stalled` default                 | 1 (dead-letter on first stall) | 3                | autopilot survives long embed runs |
+| New + extended unit tests                         | 1696                | **1743 (+47 + 119 new assertions)** | +47                |
+| Root-cause fixes vs symptom patches               | 0                   | **8 / 8**                   | structural              |
+
+### What this means for you
+
+Your agent's feedback loops tighten. When sync blocks, doctor surfaces the exact file with the YAML problem and the commit where it showed up. When a migration gets stuck, there's a cap and a clear escape. When you're on Supabase's transaction pooler and `gbrain upgrade` spawns subprocesses, set `GBRAIN_POOL_SIZE=2` and stop MaxClients crashes. Run `gbrain doctor` and the `brain_score` breakdown points at what to fix first: embed coverage, link density, timeline coverage, orphans, or dead links.
+
+## To take advantage of v0.14.2
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Supabase pooler users (port 6543) now have a knob.** If you hit MaxClients during upgrades, set `GBRAIN_POOL_SIZE=2` (or lower) in your environment before running `gbrain upgrade`.
+3. **Check sync health after the upgrade:**
+   ```bash
+   gbrain doctor
+   ```
+   If it warns about `sync_failures`, the paths and errors are in `~/.gbrain/sync-failures.jsonl`. Fix the offending YAML frontmatter and re-run `gbrain sync`, or use `gbrain sync --skip-failed` to acknowledge known-broken files and advance past them.
+4. **Wedged migrations:** If `doctor` ever flags a version with 3 consecutive partials, run `gbrain apply-migrations --force-retry vX.Y.Z` to reset the state machine, then `gbrain apply-migrations --yes` to re-attempt.
+5. **If any step fails or the numbers look wrong,** file an issue: https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+### Itemized changes
+
+#### Reliability
+- **Bug 2: `GBRAIN_POOL_SIZE` env knob** (`src/core/db.ts`, `src/commands/import.ts`). Honored by both the singleton pool and the parallel-import worker pool. Defaults to 10; lower for Supabase transaction pooler. `initPostgres` / `initPGLite` now wrap lifecycle in `try { ... } finally { await engine.disconnect() }`.
+- **Bug 3: Migration ledger centralization + wedge cap** (`src/commands/apply-migrations.ts`, `src/core/preferences.ts`). Runner owns all ledger writes. 3 consecutive partials = wedged, skipped with a loud message. New `--force-retry <version>` flag writes a `'retry'` marker without faking success. `complete` status never regresses. `appendCompletedMigration` is idempotent on double-complete.
+- **Bug 8: `max_stalled` default 1 → 3** (`src/core/schema-embedded.ts`, `src/core/pglite-schema.ts`, `src/schema.sql`). First lock-lost tick no longer dead-letters. `v0_14_0` Phase A ALTERs existing installs. `autopilot-cycle` handler yields to the event loop between phases so the worker's lock-renewal timer fires. (v0.14.3 further bumps this to 5 and adds a non-terminal row backfill — see #219.)
+- **Bug 9: Sync gate + acknowledge mechanism** (`src/commands/sync.ts`, `src/commands/import.ts`, `src/core/sync.ts`). All 3 sync paths (incremental, full via `runImport`, `gbrain import` git continuity) gate `sync.last_commit` on no-failures. Failures append to `~/.gbrain/sync-failures.jsonl` with dedup key. New `gbrain sync --skip-failed` + `--retry-failed` flags. Doctor surfaces unacknowledged failures.
+
+#### Observability
+- **Bug 7: `doctor --fast` source-aware messages** (`src/core/config.ts`, `src/cli.ts`, `src/commands/doctor.ts`). New `getDbUrlSource()` returns `'env:GBRAIN_DATABASE_URL' | 'env:DATABASE_URL' | 'config-file' | null`. Doctor emits `Skipping DB checks (--fast mode, URL present from env:GBRAIN_DATABASE_URL)` when applicable.
+- **Bug 11: `brain_score` breakdown + metric clarity** (`src/core/types.ts`, both engines' `getHealth()`). Added `embed_coverage_score`, `link_density_score`, `timeline_coverage_score`, `no_orphans_score`, `no_dead_links_score`. Sum equals `brain_score` by construction. `dead_links` now on `BrainHealth` (resolves a pre-existing `featuresTeaserForDoctor` drift). `orphan_pages` docs clarified — it's "islanded" (no inbound AND no outbound), not the stricter "zero inbound" graph definition.
+
+#### Graph correctness
+- **Bug 6/10: `jsonb_agg(DISTINCT ...)` in legacy `traverseGraph`** (`src/core/postgres-engine.ts`, `src/core/pglite-engine.ts`). Presentation-level dedup only — the schema continues to preserve per-`origin_page_id` / per-`link_source` provenance rows. Fixes duplicate edges like `works_at → companies/brex` appearing twice in `gbrain graph`.
+
+#### New migration
+- **Bug 5: `v0_14_0` migration registered** (`src/commands/migrations/v0_14_0.ts`). Phase A: `ALTER minion_jobs.max_stalled SET DEFAULT 3` (idempotent). Phase B: emits `pending-host-work.jsonl` entry pointing at `skills/migrations/v0.14.0.md` for shell-jobs adoption. Registered in `src/commands/migrations/index.ts`. `package.json` bumped to 0.14.2 (0.14.0 and 0.14.1 were taken by upstream during this branch's work).
+
+#### Tests
+- New: `test/traverse-graph-dedup.test.ts`, `test/sync-failures.test.ts`, `test/brain-score-breakdown.test.ts`, `test/migration-resume.test.ts`, `test/migrations-v0_14_0.test.ts`.
+- Extended: `test/migrate.test.ts` (`resolvePoolSize`), `test/doctor.test.ts` (`dbSource`), `test/apply-migrations.test.ts` (`skippedFuture` includes `0.14.0`).
+- E2E updated: `test/e2e/migration-flow.test.ts` assertions aligned with the new runner-owned-ledger contract (orchestrator no longer writes completed.jsonl directly).
+
+#### Deferred to v0.15
+- Deep `AbortSignal` threading through `runEmbedCore` / `runExtractCore` / `runBacklinksCore` / `performSync`. Between-phase yield addresses the Bug 8 lock-renewal root cause; mid-phase cancellation on huge brains belongs in the queue-polish PR.
+- `failJobFromSweeper` for `handleTimeouts` / `handleStalled`. Current direct `status='dead'` writes kept.
 
 ## [0.14.1] - 2026-04-20
 
