@@ -492,6 +492,45 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_cycle_locks_ttl ON gbrain_cycle_locks(ttl_expires_at);
     `,
   },
+  {
+    version: 17,
+    name: 'rls_backfill_missing_tables',
+    // v0.18 RLS hardening: 10 gbrain-managed public tables shipped without
+    // RLS enabled (access_tokens, mcp_request_log, minion_inbox,
+    // minion_attachments, subagent_messages, subagent_tool_executions,
+    // subagent_rate_leases, gbrain_cycle_locks, budget_ledger,
+    // budget_reservations). Supabase exposes the public schema via
+    // PostgREST, so tables without RLS are readable by anyone with the
+    // anon key.
+    //
+    // Gated on BYPASSRLS matching the pattern in schema.sql: enabling RLS
+    // on a table in a session that does NOT hold BYPASSRLS would lock
+    // the session out of its own data. RAISE WARNING is visible to the
+    // migration runner's log stream.
+    sql: `
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE access_tokens ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE mcp_request_log ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE minion_inbox ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE minion_attachments ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE subagent_messages ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE budget_ledger ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE budget_reservations ENABLE ROW LEVEL SECURITY;
+          RAISE NOTICE 'v17: RLS enabled on 10 backfill tables (role % has BYPASSRLS)', current_user;
+        ELSE
+          RAISE WARNING 'v17: Skipping RLS backfill: role % does not have BYPASSRLS privilege. Run as postgres role to enable.', current_user;
+        END IF;
+      END $$;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

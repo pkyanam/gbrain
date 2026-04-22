@@ -430,6 +430,34 @@ CREATE TABLE IF NOT EXISTS gbrain_cycle_locks (
 );
 CREATE INDEX IF NOT EXISTS idx_cycle_locks_ttl ON gbrain_cycle_locks(ttl_expires_at);
 
+-- Budget ledger + reservations: resolver spend tracker.
+-- Previously migration-only (v12); promoted to baseline in v0.18 so fresh
+-- installs pick up RLS from the block below. Migration v12 uses CREATE
+-- TABLE IF NOT EXISTS, so this duplication is safe on existing brains.
+CREATE TABLE IF NOT EXISTS budget_ledger (
+  scope          TEXT        NOT NULL,
+  resolver_id    TEXT        NOT NULL,
+  local_date     DATE        NOT NULL,
+  reserved_usd   NUMERIC(12,4) NOT NULL DEFAULT 0,
+  committed_usd  NUMERIC(12,4) NOT NULL DEFAULT 0,
+  cap_usd        NUMERIC(12,4),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (scope, resolver_id, local_date)
+);
+CREATE TABLE IF NOT EXISTS budget_reservations (
+  reservation_id TEXT        PRIMARY KEY,
+  scope          TEXT        NOT NULL,
+  resolver_id    TEXT        NOT NULL,
+  local_date     DATE        NOT NULL,
+  estimate_usd   NUMERIC(12,4) NOT NULL,
+  reserved_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at     TIMESTAMPTZ NOT NULL,
+  status         TEXT        NOT NULL DEFAULT 'held'
+);
+CREATE INDEX IF NOT EXISTS idx_budget_reservations_expires
+  ON budget_reservations(expires_at) WHERE status = 'held';
+
 -- NOTIFY trigger for real-time job events (Postgres only, not PGLite)
 CREATE OR REPLACE FUNCTION notify_minion_job_change() RETURNS trigger AS \$\$
 BEGIN
@@ -469,6 +497,16 @@ BEGIN
     ALTER TABLE config ENABLE ROW LEVEL SECURITY;
     ALTER TABLE files ENABLE ROW LEVEL SECURITY;
     ALTER TABLE minion_jobs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE access_tokens ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE mcp_request_log ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE minion_inbox ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE minion_attachments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE subagent_messages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE budget_ledger ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE budget_reservations ENABLE ROW LEVEL SECURITY;
     RAISE NOTICE 'RLS enabled on all tables (role % has BYPASSRLS)', current_user;
   ELSE
     RAISE WARNING 'Skipping RLS: role % does not have BYPASSRLS privilege. Run as postgres role to enable.', current_user;
