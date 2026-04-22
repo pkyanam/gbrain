@@ -20,7 +20,7 @@ import {
   type ResolvableIssue,
   type AutoFixReport,
 } from '../core/check-resolvable.ts';
-import { findRepoRoot } from '../core/repo-root.ts';
+import { autoDetectSkillsDir, type SkillsDirSource } from '../core/repo-root.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,6 +41,8 @@ export interface Envelope {
   error: 'no_skills_dir' | null;
   message: string | null;
 }
+
+type SkillsDirResolutionSource = 'explicit' | SkillsDirSource | null;
 
 export interface Flags {
   help: boolean;
@@ -119,23 +121,43 @@ export function parseFlags(argv: string[]): Flags {
 // Skills-dir resolution
 // ---------------------------------------------------------------------------
 
-export function resolveSkillsDir(flags: Flags): { dir: string | null; error: Envelope['error']; message: string | null } {
+export function resolveSkillsDir(flags: Flags): {
+  dir: string | null;
+  error: Envelope['error'];
+  message: string | null;
+  source: SkillsDirResolutionSource;
+} {
   if (flags.skillsDir) {
     const dir = isAbsolute(flags.skillsDir)
       ? flags.skillsDir
       : resolvePath(process.cwd(), flags.skillsDir);
-    return { dir, error: null, message: null };
+    return { dir, error: null, message: null, source: 'explicit' };
   }
-  const repoRoot = findRepoRoot();
-  if (!repoRoot) {
+
+  const detected = autoDetectSkillsDir();
+  if (!detected.dir) {
     return {
       dir: null,
       error: 'no_skills_dir',
       message:
-        'Could not locate skills/RESOLVER.md from cwd. Pass --skills-dir <path> or run from inside a gbrain repo.',
+        'Could not auto-detect skills/RESOLVER.md. Checked repo-root skills/, $OPENCLAW_WORKSPACE/skills, ~/.openclaw/workspace/skills, and ./skills. Pass --skills-dir <path>.',
+      source: null,
     };
   }
-  return { dir: resolvePath(repoRoot, 'skills'), error: null, message: null };
+
+  const sourceLabel = {
+    repo_root: 'repo root skills/',
+    openclaw_workspace_env: '$OPENCLAW_WORKSPACE/skills',
+    openclaw_workspace_home: '~/.openclaw/workspace/skills',
+    cwd_skills: './skills',
+  }[detected.source!]!;
+
+  return {
+    dir: detected.dir,
+    error: null,
+    message: `Auto-detected skills directory from ${sourceLabel}: ${detected.dir}`,
+    source: detected.source,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +233,7 @@ export async function runCheckResolvable(args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  const { dir, error, message } = resolveSkillsDir(flags);
+  const { dir, error, message, source } = resolveSkillsDir(flags);
 
   if (error === 'no_skills_dir') {
     const env: Envelope = {
@@ -232,6 +254,9 @@ export async function runCheckResolvable(args: string[]): Promise<void> {
   }
 
   const skillsDir = dir!;
+  if (!flags.json && source !== 'explicit' && message) {
+    console.log(message);
+  }
 
   let autoFix: AutoFixReport | null = null;
   if (flags.fix) {

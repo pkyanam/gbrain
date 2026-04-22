@@ -88,11 +88,15 @@ what evals gate; the resolver entry determines what trigger-eval checks).
    patterns the user ACTUALLY types, not what you think they should type.
 7. Add a resolver trigger eval that feeds those patterns in and asserts
    they route to the new skill.
-8. Run `gbrain check-resolvable`. It validates reachability (is the skill
-   mentioned from RESOLVER.md?), MECE overlap (does it duplicate an
-   existing skill's trigger?), gap detection (are there user intents that
-   fall through the resolver with no match?), and DRY. If it fails, fix
-   the skill (or extend an existing one instead of creating a duplicate).
+8. Run `gbrain check-resolvable` (auto-detects skill trees) or
+   `gbrain check-resolvable --skills-dir <path>` for custom locations.
+   OpenClaw workspaces are auto-detected from
+   `~/.openclaw/workspace/skills/`. The check validates reachability (is
+   the skill mentioned from RESOLVER.md?), MECE overlap (does it duplicate
+   an existing skill's trigger?), gap detection (are there user intents
+   that fall through the resolver with no match?), and DRY. If it fails,
+   fix the skill (or extend an existing one instead of creating a
+   duplicate).
 9. Add an E2E smoke test. For gbrain: submit a Minion job or run a CLI
    invocation end-to-end against a fixture brain; assert side effects.
 10. Update `brain/RESOLVER.md` if the skill writes brain pages. Orphaned

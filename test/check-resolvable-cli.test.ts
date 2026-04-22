@@ -135,6 +135,7 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
     const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, skillsDir: 'skills' });
     expect(r.dir).toMatch(/\/skills$/);
     expect(r.error).toBeNull();
+    expect(r.source).toBe('explicit');
   });
 
   it('REGRESSION-GATE: returns no_skills_dir error when no --skills-dir and findRepoRoot fails', () => {
@@ -159,6 +160,38 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
     const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, skillsDir: null });
     expect(r.error).toBeNull();
     expect(r.dir).toMatch(/\/skills$/);
+    expect(r.source).toBe('repo_root');
+  });
+
+  it('REGRESSION-GATE: --skills-dir override takes precedence over OpenClaw env auto-detection', () => {
+    const explicit = mkdtempSync(join(tmpdir(), 'explicit-skills-'));
+    mkdirSync(explicit, { recursive: true });
+    writeFileSync(join(explicit, 'RESOLVER.md'), '# RESOLVER\n');
+
+    const workspace = mkdtempSync(join(tmpdir(), 'openclaw-ws-'));
+    mkdirSync(join(workspace, 'skills'), { recursive: true });
+    writeFileSync(join(workspace, 'skills', 'RESOLVER.md'), '# RESOLVER\n');
+
+    const prev = process.env.OPENCLAW_WORKSPACE;
+    process.env.OPENCLAW_WORKSPACE = workspace;
+    try {
+      const r = resolveSkillsDir({
+        help: false,
+        json: false,
+        fix: false,
+        dryRun: false,
+        verbose: false,
+        skillsDir: explicit,
+      });
+      expect(r.error).toBeNull();
+      expect(r.dir).toBe(explicit);
+      expect(r.source).toBe('explicit');
+    } finally {
+      if (prev === undefined) delete process.env.OPENCLAW_WORKSPACE;
+      else process.env.OPENCLAW_WORKSPACE = prev;
+      rmSync(explicit, { recursive: true, force: true });
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 });
 
@@ -278,5 +311,12 @@ describe('gbrain check-resolvable CLI — integration', () => {
     expect(r.stdout).toContain('resolver_health: OK');
     expect(r.stdout).toContain('2 skills');
     expect(r.status).toBe(0);
+  });
+
+  it('logs the auto-detected skills directory path in human mode', () => {
+    const r = run([]);
+    expect(r.status === 0 || r.status === 1).toBe(true);
+    expect(r.stdout).toContain('Auto-detected skills directory');
+    expect(r.stdout).toContain('/skills');
   });
 });

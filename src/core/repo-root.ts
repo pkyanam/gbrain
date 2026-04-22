@@ -1,5 +1,5 @@
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { isAbsolute, join, resolve as resolvePath } from 'path';
 
 /**
  * Walk up from `startDir` looking for `skills/RESOLVER.md` — the marker of a
@@ -18,4 +18,57 @@ export function findRepoRoot(startDir: string = process.cwd()): string | null {
     dir = parent;
   }
   return null;
+}
+
+export type SkillsDirSource =
+  | 'repo_root'
+  | 'openclaw_workspace_env'
+  | 'openclaw_workspace_home'
+  | 'cwd_skills';
+
+export interface SkillsDirDetection {
+  dir: string | null;
+  source: SkillsDirSource | null;
+}
+
+function hasResolver(skillsDir: string): boolean {
+  return existsSync(join(skillsDir, 'RESOLVER.md'));
+}
+
+function isGbrainRepoRoot(dir: string): boolean {
+  return existsSync(join(dir, 'src', 'cli.ts')) && existsSync(join(dir, 'skills', 'RESOLVER.md'));
+}
+
+export function autoDetectSkillsDir(
+  startDir: string = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
+): SkillsDirDetection {
+  const repoRoot = findRepoRoot(startDir);
+  if (repoRoot && isGbrainRepoRoot(repoRoot)) {
+    return { dir: join(repoRoot, 'skills'), source: 'repo_root' };
+  }
+
+  if (env.OPENCLAW_WORKSPACE) {
+    const workspace = isAbsolute(env.OPENCLAW_WORKSPACE)
+      ? env.OPENCLAW_WORKSPACE
+      : resolvePath(startDir, env.OPENCLAW_WORKSPACE);
+    const openclawEnvSkills = join(workspace, 'skills');
+    if (hasResolver(openclawEnvSkills)) {
+      return { dir: openclawEnvSkills, source: 'openclaw_workspace_env' };
+    }
+  }
+
+  if (env.HOME) {
+    const openclawHomeSkills = join(env.HOME, '.openclaw', 'workspace', 'skills');
+    if (hasResolver(openclawHomeSkills)) {
+      return { dir: openclawHomeSkills, source: 'openclaw_workspace_home' };
+    }
+  }
+
+  const cwdSkills = join(startDir, 'skills');
+  if (hasResolver(cwdSkills)) {
+    return { dir: cwdSkills, source: 'cwd_skills' };
+  }
+
+  return { dir: null, source: null };
 }
