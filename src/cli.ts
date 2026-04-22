@@ -19,7 +19,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'dream']);
 
 async function main() {
   // Parse global flags (--quiet / --progress-json / --progress-interval)
@@ -358,6 +358,20 @@ async function handleCliOnly(command: string, args: string[]) {
     return;
   }
 
+  if (command === 'dream') {
+    const { runDream } = await import('./commands/dream.ts');
+    // Dream runs filesystem phases first, DB phases only if available
+    let eng: BrainEngine | null = null;
+    try {
+      eng = await connectEngine();
+    } catch {
+      // DB unavailable — still run filesystem phases
+    }
+    await runDream(eng, args);
+    if (eng) await eng.disconnect();
+    return;
+  }
+
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
   try {
@@ -443,6 +457,7 @@ async function handleCliOnly(command: string, args: string[]) {
         await runOrphans(engine, args);
         break;
       }
+
     }
   } finally {
     if (command !== 'serve') await engine.disconnect();
@@ -552,6 +567,9 @@ TOOLS
   check-backlinks <check|fix> [dir]  Find/fix missing back-links across brain
   lint <dir|file> [--fix]            Catch LLM artifacts, placeholder dates, bad frontmatter
   orphans [--json] [--count]         Find pages with no inbound wikilinks
+  dream [--json] [--dry-run]         Nightly dream cycle: lint, backlinks, orphans, embed, sync
+        [--phase <name>]             Run single phase (lint|backlinks|orphans|embed|sync)
+        [--skip-embed] [--skip-sync] Skip slow phases
   report --type <name> --content ... Save timestamped report to brain/reports/
 
 JOBS (Minions)
