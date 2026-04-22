@@ -84,7 +84,11 @@ describe('findRepoRoot', () => {
     expect(found.source).toBe('cwd_skills');
   });
 
-  it('auto-detect: prioritizes repo-root skills over OpenClaw fallbacks', () => {
+  it('D-CX-4: $OPENCLAW_WORKSPACE wins over repo-root walk when explicitly set', () => {
+    // Prior priority (shadow bug): walking up from cwd found gbrain's
+    // repo root first and silently ignored the env var. Post-D-CX-4:
+    // explicit env wins. Unset env → repo-root walk still wins
+    // (tested below).
     const root = scratch();
     seedRepo(root);
     const workspace = scratch();
@@ -92,7 +96,67 @@ describe('findRepoRoot', () => {
     const nested = join(root, 'a', 'b');
     mkdirSync(nested, { recursive: true });
     const found = autoDetectSkillsDir(nested, { OPENCLAW_WORKSPACE: workspace });
+    expect(found.dir).toBe(join(workspace, 'skills'));
+    expect(found.source).toBe('openclaw_workspace_env');
+  });
+
+  it('D-CX-4: repo-root walk still wins when OPENCLAW_WORKSPACE is NOT set', () => {
+    const root = scratch();
+    seedRepo(root);
+    const nested = join(root, 'a', 'b');
+    mkdirSync(nested, { recursive: true });
+    const found = autoDetectSkillsDir(nested, {});
     expect(found.dir).toBe(join(root, 'skills'));
     expect(found.source).toBe('repo_root');
+  });
+
+  it('W1: AGENTS.md at skills dir is accepted (OpenClaw skills-subdir variant)', () => {
+    const workspace = scratch();
+    const skillsDir = join(workspace, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    // seed AGENTS.md (no RESOLVER.md)
+    require('fs').writeFileSync(
+      join(skillsDir, 'AGENTS.md'),
+      '# AGENTS\n\n| Trigger | Skill |\n|---|---|\n',
+    );
+    const found = autoDetectSkillsDir(scratch(), { OPENCLAW_WORKSPACE: workspace });
+    expect(found.dir).toBe(skillsDir);
+    expect(found.source).toBe('openclaw_workspace_env');
+  });
+
+  it('W1: AGENTS.md at workspace root (OpenClaw-native layout)', () => {
+    // The reference OpenClaw deployment places AGENTS.md at
+    // workspace/AGENTS.md, with skills in workspace/skills/. Auto-detect
+    // must find the skills dir and flag this as the workspace-root variant.
+    const workspace = scratch();
+    const skillsDir = join(workspace, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    require('fs').writeFileSync(
+      join(workspace, 'AGENTS.md'),
+      '# AGENTS\n\n| Trigger | Skill |\n|---|---|\n',
+    );
+    const found = autoDetectSkillsDir(scratch(), { OPENCLAW_WORKSPACE: workspace });
+    expect(found.dir).toBe(skillsDir);
+    expect(found.source).toBe('openclaw_workspace_env_root');
+  });
+
+  it('W1: both RESOLVER.md and AGENTS.md present — RESOLVER.md wins', () => {
+    // Policy: when both exist at the same location, gbrain-native wins.
+    const workspace = scratch();
+    const skillsDir = join(workspace, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    require('fs').writeFileSync(
+      join(skillsDir, 'RESOLVER.md'),
+      '# RESOLVER\n\n| Trigger | Skill |\n|---|---|\n',
+    );
+    require('fs').writeFileSync(
+      join(skillsDir, 'AGENTS.md'),
+      '# AGENTS\n\n| Trigger | Skill |\n|---|---|\n',
+    );
+    const found = autoDetectSkillsDir(scratch(), { OPENCLAW_WORKSPACE: workspace });
+    expect(found.dir).toBe(skillsDir);
+    // Source is still `env` — the distinction is which file was found,
+    // and RESOLVER.md takes precedence inside resolveWorkspaceSkillsDir.
+    expect(found.source).toBe('openclaw_workspace_env');
   });
 });

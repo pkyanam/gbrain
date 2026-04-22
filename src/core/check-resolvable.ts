@@ -12,6 +12,8 @@
 
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join, relative } from 'path';
+import { findResolverFile, RESOLVER_FILENAMES_LABEL } from './resolver-filenames.ts';
+import { loadOrDeriveManifest } from './skill-manifest.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,7 +36,27 @@ export interface ResolvableIssue {
 }
 
 export interface ResolvableReport {
+  /**
+   * True when there are no error-severity issues. Warnings do NOT flip `ok`.
+   * Callers that want strict-mode (warnings fail CI too) should gate on
+   * `errors.length === 0 && warnings.length === 0`.
+   */
   ok: boolean;
+  /**
+   * Error-severity issues only. Determines `ok` and default exit codes.
+   * A subset of `issues[]`.
+   */
+  errors: ResolvableIssue[];
+  /**
+   * Warning-severity issues. Informational by default; `--strict` promotes.
+   * A subset of `issues[]`.
+   */
+  warnings: ResolvableIssue[];
+  /**
+   * @deprecated Use `errors` and `warnings` separately. Kept for one-release
+   * backwards compatibility; will be removed in v0.18. Equivalent to
+   * `[...errors, ...warnings]`.
+   */
   issues: ResolvableIssue[];
   summary: {
     total_skills: number;
@@ -111,17 +133,10 @@ export function parseResolverEntries(resolverContent: string): ResolverEntry[] {
   return entries;
 }
 
-/** Extract skill names from manifest.json */
-function loadManifest(skillsDir: string): Array<{ name: string; path: string }> {
-  const manifestPath = join(skillsDir, 'manifest.json');
-  if (!existsSync(manifestPath)) return [];
-  try {
-    const content = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-    return content.skills || [];
-  } catch {
-    return [];
-  }
-}
+// Manifest loading is now delegated to src/core/skill-manifest.ts
+// (loadOrDeriveManifest). That module auto-derives from walking
+// `skillsDir/*/SKILL.md` when manifest.json is missing — the scenario
+// needed for AGENTS.md-only OpenClaw deployments. See D-CX-12 / F-ENG-1.
 
 /** Simple YAML frontmatter parser — extracts triggers array if present. */
 function extractTriggers(skillContent: string): string[] {
@@ -211,25 +226,34 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
   const issues: ResolvableIssue[] = [];
 
   // Load inputs
-  const resolverPath = join(skillsDir, 'RESOLVER.md');
-  if (!existsSync(resolverPath)) {
+  // Accept RESOLVER.md or AGENTS.md (W1). Also check one level up: the
+  // reference OpenClaw deployment layout places AGENTS.md at the
+  // workspace root, with skills/ below. We try skills dir first
+  // (gbrain-native), then its parent (OpenClaw-native).
+  const resolverPath =
+    findResolverFile(skillsDir) ?? findResolverFile(join(skillsDir, '..'));
+  if (!resolverPath) {
+    const suggested = join(skillsDir, 'RESOLVER.md');
+    const missingIssue: ResolvableIssue = {
+      type: 'missing_file',
+      severity: 'error',
+      skill: RESOLVER_FILENAMES_LABEL,
+      message: `${RESOLVER_FILENAMES_LABEL} not found in ${skillsDir} or its parent`,
+      action: `Create ${suggested} with skill routing tables`,
+      fix: { type: 'create_stub', file: suggested },
+    };
     return {
       ok: false,
-      issues: [{
-        type: 'missing_file',
-        severity: 'error',
-        skill: 'RESOLVER.md',
-        message: 'RESOLVER.md not found',
-        action: `Create ${resolverPath} with skill routing tables`,
-        fix: { type: 'create_stub', file: resolverPath },
-      }],
+      errors: [missingIssue],
+      warnings: [],
+      issues: [missingIssue],
       summary: { total_skills: 0, reachable: 0, unreachable: 0, overlaps: 0, gaps: 0 },
     };
   }
 
   const resolverContent = readFileSync(resolverPath, 'utf-8');
   const entries = parseResolverEntries(resolverContent);
-  const manifest = loadManifest(skillsDir);
+  const { skills: manifest } = loadOrDeriveManifest(skillsDir);
 
   // Build lookup sets
   const resolverSkillPaths = new Set(
@@ -406,8 +430,12 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
     }
   }
 
+  const errors = issues.filter(i => i.severity === 'error');
+  const warnings = issues.filter(i => i.severity === 'warning');
   return {
-    ok: issues.filter(i => i.severity === 'error').length === 0,
+    ok: errors.length === 0,
+    errors,
+    warnings,
     issues,
     summary: {
       total_skills: manifest.length,

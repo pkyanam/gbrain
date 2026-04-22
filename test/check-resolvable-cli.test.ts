@@ -253,20 +253,52 @@ describe('gbrain check-resolvable CLI — integration', () => {
     expect(r.stdout).toContain('resolver_health: OK');
   });
 
-  it('REGRESSION-GATE: exits 1 when fixture has a warning-level orphan_trigger only', () => {
+  it('D-CX-3: warnings-only fixture exits 0 in default mode', () => {
     // "alpha" is in resolver but not manifest → orphan_trigger (warning)
+    // Per D-CX-3 (codex review outside voice): warnings alone do not flip
+    // the exit code. This is the new contract; callers who want strict
+    // behavior pass --strict. Prior contract (exit 1 on any warning) broke
+    // CI for workspaces emitting warning-level advisories like filing-audit.
     const skillsDir = makeFixture(
       [{ name: 'alpha', triggers: ['alpha'], inManifest: false }],
       created,
     );
     const r = run(['--json', '--skills-dir', skillsDir]);
     expect(r.json).not.toBeNull();
-    const warnings = r.json.report.issues.filter((i: any) => i.severity === 'warning');
-    const errors = r.json.report.issues.filter((i: any) => i.severity === 'error');
-    expect(warnings.length).toBeGreaterThan(0);
-    expect(errors.length).toBe(0);
-    // Doctor's ok=true-on-warnings-only would exit 0. check-resolvable MUST exit 1.
+    expect(r.json.report.warnings.length).toBeGreaterThan(0);
+    expect(r.json.report.errors.length).toBe(0);
+    // warnings.length > 0 but errors.length === 0 → exit 0 (advisory)
+    expect(r.status).toBe(0);
+    expect(r.json.ok).toBe(true);
+  });
+
+  it('D-CX-3: --strict promotes warnings to exit 1', () => {
+    const skillsDir = makeFixture(
+      [{ name: 'alpha', triggers: ['alpha'], inManifest: false }],
+      created,
+    );
+    const r = run(['--json', '--strict', '--skills-dir', skillsDir]);
+    expect(r.json).not.toBeNull();
+    expect(r.json.report.warnings.length).toBeGreaterThan(0);
+    expect(r.json.report.errors.length).toBe(0);
+    // --strict flips ok to false and exit to 1 when warnings exist
+    expect(r.json.ok).toBe(false);
     expect(r.status).toBe(1);
+  });
+
+  it('D-CX-3: report has separate errors[] and warnings[] arrays alongside issues[]', () => {
+    const skillsDir = makeFixture(
+      [{ name: 'alpha', triggers: ['alpha'], inManifest: false }],
+      created,
+    );
+    const r = run(['--json', '--skills-dir', skillsDir]);
+    expect(r.json).not.toBeNull();
+    const rep = r.json.report;
+    expect(Array.isArray(rep.errors)).toBe(true);
+    expect(Array.isArray(rep.warnings)).toBe(true);
+    // Deprecated flat `issues` still present for one-release backcompat
+    expect(Array.isArray(rep.issues)).toBe(true);
+    expect(rep.issues.length).toBe(rep.errors.length + rep.warnings.length);
   });
 
   it('exits 1 when fixture has an error-level unreachable skill', () => {
