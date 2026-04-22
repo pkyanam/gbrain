@@ -111,10 +111,6 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON content_chunks USING hnsw (em
 -- and a frontmatter-derived edge with the same (from, to, type) tuple coexist.
 -- Reconciliation on put_page filters by (link_source='frontmatter' AND
 -- origin_page_id = written_page) — never touches other pages' edges.
--- NOTE (v0.17.0 Step 1): links.resolution_type is NOT added yet — it
--- lands in v17 alongside the link-extraction rewrite (Step 4). The
--- column is purely informational; adding it now would imply we have a
--- qualified wikilink parser that produces values for it.
 CREATE TABLE IF NOT EXISTS links (
   id             SERIAL PRIMARY KEY,
   from_page_id   INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
@@ -124,6 +120,11 @@ CREATE TABLE IF NOT EXISTS links (
   link_source    TEXT    CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual')),
   origin_page_id INTEGER REFERENCES pages(id) ON DELETE SET NULL,
   origin_field   TEXT,
+  -- v0.17.0 Step 4: 'qualified' when the link was written as
+  -- [[source:slug]] (target source pinned). 'unqualified' when written
+  -- as bare [[slug]] and resolved via local-first fallback at
+  -- extraction time. NULL for legacy/manual/frontmatter edges.
+  resolution_type TEXT   CHECK (resolution_type IS NULL OR resolution_type IN ('qualified', 'unqualified')),
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- NULLS NOT DISTINCT (PG15+) so two rows with link_source IS NULL or
   -- origin_page_id IS NULL collide as expected. Without this, every row with
