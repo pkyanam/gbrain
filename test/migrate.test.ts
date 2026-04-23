@@ -218,7 +218,28 @@ describe('migration v24 — rls_backfill_missing_tables', () => {
     const v24 = MIGRATIONS.find(m => m.version === 24);
     const sql = v24!.sql || '';
     expect(sql).toContain('rolbypassrls');
-    expect(sql).toContain('IF has_bypass THEN');
+    // The gate can be either IF has_bypass / early-raise pattern.
+    expect(sql).toMatch(/IF (NOT )?has_bypass/);
+  });
+
+  // Self-healing guard: the budget_* tables are migration-only (v12). If an
+  // operator manually dropped them, or if a brain was somehow pinned to a
+  // pre-v12 version when those tables didn't exist, a bare `ALTER TABLE
+  // budget_ledger ...` would fail with 42P01 and abort v24. Wrapping those
+  // two ALTERs in an `IF EXISTS (information_schema.tables ...)` check lets
+  // the migration skip them silently instead of erroring out. The other 8
+  // tables are created by schema.sql on every initSchema and don't need
+  // the guard — bare ALTER is fine.
+  test('guards budget_ledger + budget_reservations with information_schema.tables IF EXISTS', () => {
+    const v24 = MIGRATIONS.find(m => m.version === 24);
+    const sql = v24!.sql || '';
+    // Both budget tables must be wrapped in an existence check.
+    expect(sql).toMatch(
+      /IF EXISTS \(SELECT 1 FROM information_schema\.tables[\s\S]{0,200}table_name = 'budget_ledger'\)[\s\S]{0,200}ALTER TABLE budget_ledger ENABLE ROW LEVEL SECURITY/,
+    );
+    expect(sql).toMatch(
+      /IF EXISTS \(SELECT 1 FROM information_schema\.tables[\s\S]{0,200}table_name = 'budget_reservations'\)[\s\S]{0,200}ALTER TABLE budget_reservations ENABLE ROW LEVEL SECURITY/,
+    );
   });
 
   // Codex found: if v24 RAISE WARNINGs instead of raising on non-BYPASSRLS,
