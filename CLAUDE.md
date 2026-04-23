@@ -296,8 +296,8 @@ stop and remove it before starting a new one.
 
 ## Skills
 
-Read the skill files in `skills/` before doing brain operations. GBrain ships 26 skills
-organized by `skills/RESOLVER.md`:
+Read the skill files in `skills/` before doing brain operations. GBrain ships 28 skills
+organized by `skills/RESOLVER.md` (`AGENTS.md` is also accepted as of v0.19):
 
 **Original 8 (conformance-migrated):** ingest (thin router), query, maintain, enrich,
 briefing, migrate, setup, publish.
@@ -307,6 +307,9 @@ meeting-ingestion, citation-fixer, repo-architecture, skill-creator, daily-task-
 
 **Operational + identity:** daily-task-prep, cross-modal-review, cron-scheduler, reports,
 testing, soul-audit, webhook-transforms, data-research, minion-orchestrator.
+
+**Skillify loop (v0.19):** skillify (the markdown orchestration), skillpack-check
+(agent-readable health report).
 
 **Conventions:** `skills/conventions/` has cross-cutting rules (quality, brain-first,
 model-routing, test-before-bulk, cross-modal). `skills/_brain-filing-rules.md` and
