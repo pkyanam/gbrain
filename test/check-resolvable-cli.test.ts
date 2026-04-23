@@ -126,13 +126,13 @@ describe('check-resolvable — unit: parseFlags', () => {
 
 describe('check-resolvable — unit: resolveSkillsDir', () => {
   it('resolves absolute --skills-dir unchanged', () => {
-    const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, skillsDir: '/tmp/absolute-path' });
+    const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: '/tmp/absolute-path' });
     expect(r.dir).toBe('/tmp/absolute-path');
     expect(r.error).toBeNull();
   });
 
   it('resolves relative --skills-dir against cwd', () => {
-    const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, skillsDir: 'skills' });
+    const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: 'skills' });
     expect(r.dir).toMatch(/\/skills$/);
     expect(r.error).toBeNull();
     expect(r.source).toBe('explicit');
@@ -145,7 +145,7 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
     const original = process.cwd();
     try {
       process.chdir(empty);
-      const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, skillsDir: null });
+      const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: null });
       expect(r.error).toBe('no_skills_dir');
       expect(r.dir).toBeNull();
       expect(typeof r.message).toBe('string');
@@ -157,7 +157,7 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
 
   it('finds skills via findRepoRoot when cwd is inside a repo (no --skills-dir)', () => {
     // Running from this test file — we're inside the real gbrain repo.
-    const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, skillsDir: null });
+    const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: null });
     expect(r.error).toBeNull();
     expect(r.dir).toMatch(/\/skills$/);
     expect(r.source).toBe('repo_root');
@@ -181,6 +181,7 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
         fix: false,
         dryRun: false,
         verbose: false,
+        strict: false,
         skillsDir: explicit,
       });
       expect(r.error).toBeNull();
