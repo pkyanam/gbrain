@@ -17,8 +17,13 @@ describe('isCodeFilePath', () => {
   test('rejects non-code extensions', () => {
     expect(isCodeFilePath('notes.md')).toBe(false);
     expect(isCodeFilePath('photo.jpg')).toBe(false);
-    expect(isCodeFilePath('config.json')).toBe(false);
     expect(isCodeFilePath('README')).toBe(false);
+    // v0.20.0 Cathedral II Layer 2 widens the classifier to include
+    // config formats (.json, .yaml, .toml) and web formats (.css, .html,
+    // .vue) because the chunker supports them — they were dropped by the
+    // 9-extension v0.19.0 allowlist. `.json` is NO LONGER rejected.
+    expect(isCodeFilePath('image.svg')).toBe(false);
+    expect(isCodeFilePath('archive.zip')).toBe(false);
   });
 
   test('is case-insensitive', () => {

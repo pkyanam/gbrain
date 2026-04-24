@@ -6,7 +6,7 @@ import { importFile } from '../core/import-file.ts';
 import {
   buildSyncManifest,
   isSyncable,
-  pathToSlug,
+  resolveSlugForPath,
   recordSyncFailures,
   unacknowledgedSyncFailures,
   acknowledgeSyncFailures,
@@ -195,10 +195,15 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     renamed: manifest.renamed.filter(r => isSyncable(r.to, syncOpts)),
   };
 
-  // Delete pages that became un-syncable (modified but filtered out)
+  // Delete pages that became un-syncable (modified but filtered out).
+  // v0.20.0 Cathedral II SP-5: resolveSlugForPath picks the right slug shape
+  // (markdown vs code) based on the chunker's classifier, so a Rust file that
+  // became un-syncable (e.g., moved under `.gitignore` or filtered by
+  // strategy=markdown) deletes the actual code-slug page, not a ghost
+  // markdown-slug that never existed.
   const unsyncableModified = manifest.modified.filter(p => !isSyncable(p, syncOpts));
   for (const path of unsyncableModified) {
-    const slug = pathToSlug(path);
+    const slug = resolveSlugForPath(path);
     try {
       const existing = await engine.getPage(slug);
       if (existing) {
@@ -261,11 +266,12 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   // Phases: sync.deletes, sync.renames, sync.imports.
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
 
-  // Process deletes first (prevents slug conflicts)
+  // Process deletes first (prevents slug conflicts). SP-5: resolveSlugForPath
+  // dispatches to the right slug shape so code file deletes hit the real page.
   if (filtered.deleted.length > 0) {
     progress.start('sync.deletes', filtered.deleted.length);
     for (const path of filtered.deleted) {
-      const slug = pathToSlug(path);
+      const slug = resolveSlugForPath(path);
       await engine.deletePage(slug);
       pagesAffected.push(slug);
       progress.tick(1, slug);
@@ -273,12 +279,15 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     progress.finish();
   }
 
-  // Process renames (updateSlug preserves page_id, chunks, embeddings)
+  // Process renames (updateSlug preserves page_id, chunks, embeddings).
+  // SP-5: both old and new slugs use resolveSlugForPath so a .ts → .ts
+  // rename (code→code), .md → .md (markdown→markdown), or cross-kind rename
+  // all resolve to the right slug shape for each side.
   if (filtered.renamed.length > 0) {
     progress.start('sync.renames', filtered.renamed.length);
     for (const { from, to } of filtered.renamed) {
-      const oldSlug = pathToSlug(from);
-      const newSlug = pathToSlug(to);
+      const oldSlug = resolveSlugForPath(from);
+      const newSlug = resolveSlugForPath(to);
       try {
         await engine.updateSlug(oldSlug, newSlug);
       } catch {

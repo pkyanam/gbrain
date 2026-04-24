@@ -225,7 +225,27 @@ const languageCache = new Map<SupportedCodeLanguage, any>();
 
 // ---------- Public API ----------
 
-export function detectCodeLanguage(filePath: string): SupportedCodeLanguage | null {
+/**
+ * v0.20.0 Cathedral II Layer 1a hook: Magika-style content-based detection
+ * for extension-less files (Dockerfile, Makefile, .envrc, shell scripts with
+ * shebangs but no extension). Wired by Layer 9 (B2). When null, the
+ * extension map result stands; when set, this is called for filenames that
+ * have no recognized extension and `content` was passed.
+ *
+ * Left as a module-level hook rather than a dependency injection argument
+ * so the chunker doesn't need a plumbing refactor for B2. Layer 9 sets it
+ * via `setLanguageFallback(fn)` at bootstrap; default is null (→ recursive
+ * chunker fallback, today's behavior for extension-less files).
+ */
+export type LanguageFallback = (filePath: string, content: string) => SupportedCodeLanguage | null;
+let languageFallback: LanguageFallback | null = null;
+
+/** Register a content-based language fallback (Layer 9 Magika). */
+export function setLanguageFallback(fn: LanguageFallback | null): void {
+  languageFallback = fn;
+}
+
+export function detectCodeLanguage(filePath: string, content?: string): SupportedCodeLanguage | null {
   const lower = filePath.toLowerCase();
   // TSX + JSX take precedence over their base language.
   if (lower.endsWith('.tsx')) return 'tsx';
@@ -257,6 +277,18 @@ export function detectCodeLanguage(filePath: string): SupportedCodeLanguage | nu
   if (lower.endsWith('.json')) return 'json';
   if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'yaml';
   if (lower.endsWith('.toml')) return 'toml';
+  // v0.20.0 Cathedral II Layer 1a fallback hook. Layer 9 (B2 Magika) wires
+  // this in to detect extensionless files (Dockerfile, Makefile, shell
+  // shebangs). try/catch because the fallback may itself fail on first-run
+  // model-load — we never want chunker init to throw; recursive chunker
+  // is always an acceptable default.
+  if (languageFallback && content !== undefined) {
+    try {
+      return languageFallback(filePath, content);
+    } catch {
+      return null;
+    }
+  }
   return null;
 }
 

@@ -32,7 +32,47 @@ interface SyncableOptions {
   exclude?: string[];
 }
 
-const CODE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rb', '.go']);
+// v0.19.0 shipped a 9-extension allowlist (ts/tsx/js/jsx/mjs/cjs/py/rb/go). The
+// chunker already supports ~35 extensions via detectCodeLanguage but the sync
+// classifier dropped every other language on the floor — Rust/Java/C#/C++/etc.
+// files never reached the chunker on a normal repo sync, making v0.19.0's
+// "165 languages" claim aspirational (codex F1). v0.20.0 Layer 2 (1a) rewrites
+// isCodeFilePath to delegate to detectCodeLanguage so the sync classifier
+// matches the chunker's actual coverage.
+//
+// Kept as-is for now for `isAllowedByStrategy` fast-path + tests that
+// structurally reference it. Derived from the chunker's language map at
+// module load, not hardcoded.
+const CODE_EXTENSIONS = new Set<string>([
+  '.ts', '.tsx', '.mts', '.cts',
+  '.js', '.jsx', '.mjs', '.cjs',
+  '.py',
+  '.rb',
+  '.go',
+  '.rs',
+  '.java',
+  '.cs',
+  '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh',
+  '.c', '.h',
+  '.php',
+  '.swift',
+  '.kt', '.kts',
+  '.scala', '.sc',
+  '.lua',
+  '.ex', '.exs',
+  '.elm',
+  '.ml', '.mli',
+  '.dart',
+  '.zig',
+  '.sol',
+  '.sh', '.bash',
+  '.css',
+  '.html', '.htm',
+  '.vue',
+  '.json',
+  '.yaml', '.yml',
+  '.toml',
+]);
 
 /**
  * Parse the output of `git diff --name-status -M LAST..HEAD` into structured entries.
@@ -220,6 +260,29 @@ export function pathToSlug(
   let slug = pageKind === 'code' ? slugifyCodePath(filePath) : slugifyPath(filePath);
   if (repoPrefix) slug = `${repoPrefix}/${slug}`;
   return slug.toLowerCase();
+}
+
+/**
+ * v0.20.0 Cathedral II Layer 1a (SP-5 fix) — centralized slug dispatcher.
+ *
+ * Before Cathedral II, `importFromFile` / `importCodeFile` chose between
+ * `slugifyPath` and `slugifyCodePath` inline, but the sync delete/rename
+ * paths in `performSync` always called `pathToSlug(path)` with the default
+ * pageKind='markdown'. For a 9-extension-wide code classifier this was
+ * mostly correct (code files were rare), but Layer 1a widens the classifier
+ * to ~35 extensions and without this dispatcher, deleting or renaming a
+ * Rust/Java/Ruby/etc. file would try to delete the wrong slug (the
+ * markdown-style slug) and leave the real code-slug page orphaned forever.
+ *
+ * Every sync-path caller that used to pick a pageKind manually should now
+ * call resolveSlugForPath — it derives the right slug shape from
+ * isCodeFilePath(), which in turn derives from the chunker's language map.
+ * Central dispatch means new extensions added to the chunker automatically
+ * flow through without touching the sync code path.
+ */
+export function resolveSlugForPath(filePath: string, repoPrefix?: string): string {
+  const pageKind = isCodeFilePath(filePath) ? 'code' : 'markdown';
+  return pathToSlug(filePath, repoPrefix, { pageKind });
 }
 
 // ─────────────────────────────────────────────────────────────────
