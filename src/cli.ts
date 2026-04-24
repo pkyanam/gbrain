@@ -19,7 +19,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'auth']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'auth']);
 
 async function main() {
   // Parse global flags (--quiet / --progress-json / --progress-interval)
@@ -325,6 +325,24 @@ async function handleCliOnly(command: string, args: string[]) {
     // connect mount engines lazily on first use by op dispatch.
     const { runMounts } = await import('./commands/mounts.ts');
     await runMounts(args);
+    return;
+  }
+  if (command === 'routing-eval') {
+    const { runRoutingEvalCli } = await import('./commands/routing-eval.ts');
+    await runRoutingEvalCli(args);
+    return;
+  }
+  if (command === 'skillify') {
+    const { runSkillify } = await import('./commands/skillify.ts');
+    // `args` here is subArgs (command already stripped by caller), so
+    // args[0] is the subcommand (scaffold|check).
+    await runSkillify(args);
+    return;
+  }
+  if (command === 'skillpack') {
+    const { runSkillpack } = await import('./commands/skillpack.ts');
+    // subArgs already has `skillpack` stripped; args[0] is the subcommand.
+    await runSkillpack(args);
     return;
   }
   if (command === 'report') {
