@@ -69,7 +69,7 @@ Guarantees:
 | Condition | Action |
 |---|---|
 | User asks for deterministic command/script run | Shell job (CLI: `gbrain jobs submit shell ...`) |
-| User asks to "run in minions" + explicit command/argv | Shell job (CLI, with `--cmd` or `--argv`) |
+| User asks to "run in minions" + explicit command/argv | Shell job (CLI, `--params` with `cmd` or `argv`) |
 | User asks for research/reasoning/iterative agent | Subagent job (CLI: `gbrain agent run`) |
 | User asks to steer/pause/resume an agent | Subagent job lifecycle tools (MCP-callable) |
 | Single simple operation under ~30s | Consider inline execution first |
