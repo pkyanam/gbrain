@@ -132,3 +132,28 @@ fi
 - **Symptom:** Worker can't connect to DB
 - **Cause:** `GBRAIN_DATABASE_URL` not propagated to worker subprocess
 - **Auto-fix:** Script explicitly passes both `DATABASE_URL` and `GBRAIN_DATABASE_URL`
+
+## Anti-Patterns
+
+- ❌ Running smoke tests on every chat turn. Once per container restart (or
+  on user request) is plenty. The script is cheap but it's not free.
+- ❌ Writing a user drop-in without `timeout N` around any command that
+  could hang. A single hung drop-in stalls every subsequent run.
+- ❌ Auto-fixing without confirming the check is actually broken first.
+  The `pass → fail-detected → fix → re-test` loop is the contract; fixes
+  that skip the re-test can report success on a still-broken state.
+- ❌ Treating `skip` as `fail`. Missing prerequisites (no OpenClaw installed,
+  no brain repo configured) are skips, not failures. Exit code = count of
+  real failures, not skipped checks.
+- ❌ Hardcoding paths in a user drop-in. Read env vars
+  (`GBRAIN_DATABASE_URL`, `HOME`, etc.) so the script travels across
+  container rebuilds.
+
+## Output Format
+
+The script writes a one-line status per check to stdout (✅/❌/🔧/⏭️) plus a
+final summary line: `Results: N/M passed, F auto-fixed, S skipped`. A
+structured timestamped log appends to `$GBRAIN_SMOKE_LOG`
+(default `/tmp/gbrain-smoke-test.log`) for post-run forensics. Exit code
+equals the count of unfixed failures (0 = all pass, positive integer =
+count of remaining failures).
