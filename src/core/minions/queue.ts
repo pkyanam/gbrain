@@ -103,26 +103,60 @@ export class MinionQueue {
       }
 
       // 1b. Submission-time backpressure for high-frequency named jobs.
-      // If waiting jobs for this name already hit maxWaiting, return the most
-      // recent waiting row instead of inserting another duplicate slot.
+      // If waiting jobs for this (name, queue) already hit maxWaiting, return
+      // the most-recent waiting row instead of inserting another slot.
+      //
+      // Correctness: two concurrent submitters could both see waitingCount <
+      // maxWaiting and both insert, violating the cap. `pg_advisory_xact_lock`
+      // keyed on (name, queue) serializes concurrent count+insert decisions
+      // for the SAME key while leaving different keys fully parallel. The
+      // lock releases on txn commit/rollback automatically — no cleanup path
+      // to leak. Cost: one no-op SELECT on the hot path per coalesce-guarded
+      // submission; trivial compared to the protection.
+      //
+      // Queue scope: the filter includes `queue=$2` so a waiting
+      // 'autopilot-cycle' in queue 'default' does NOT suppress submissions
+      // to queue 'shell' with the same name. Pre-D2 code filtered on `name`
+      // alone — a real cross-queue bleed that sequential tests missed.
+      //
+      // Engine compatibility: PGLite (WASM Postgres 17) supports
+      // pg_advisory_xact_lock, so this works on both engines without branching.
       if (opts?.maxWaiting !== undefined) {
         const maxWaiting = Math.max(1, Math.floor(opts.maxWaiting));
+        const backpressureQueue = opts?.queue ?? 'default';
+        await tx.executeRaw(
+          `SELECT pg_advisory_xact_lock(hashtext('minion_maxwaiting:' || $1 || ':' || $2))`,
+          [jobName, backpressureQueue]
+        );
         const waitingCountRows = await tx.executeRaw<{ count: string }>(
           `SELECT count(*)::text AS count
            FROM minion_jobs
-           WHERE name = $1 AND status = 'waiting'`,
-          [jobName]
+           WHERE name = $1 AND queue = $2 AND status = 'waiting'`,
+          [jobName, backpressureQueue]
         );
         const waitingCount = parseInt(waitingCountRows[0]?.count ?? '0', 10);
         if (waitingCount >= maxWaiting) {
           const existingWaiting = await tx.executeRaw<Record<string, unknown>>(
             `SELECT * FROM minion_jobs
-             WHERE name = $1 AND status = 'waiting'
+             WHERE name = $1 AND queue = $2 AND status = 'waiting'
              ORDER BY created_at DESC, id DESC
              LIMIT 1`,
-            [jobName]
+            [jobName, backpressureQueue]
           );
-          if (existingWaiting.length > 0) return rowToMinionJob(existingWaiting[0]);
+          if (existingWaiting.length > 0) {
+            const coalesced = rowToMinionJob(existingWaiting[0]);
+            try {
+              const { logBackpressureCoalesce } = await import('./backpressure-audit.ts');
+              logBackpressureCoalesce({
+                queue: backpressureQueue,
+                name: jobName,
+                waiting_count: waitingCount,
+                max_waiting: maxWaiting,
+                returned_job_id: coalesced.id,
+              });
+            } catch { /* audit failures never block submission */ }
+            return coalesced;
+          }
         }
       }
 
