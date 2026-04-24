@@ -1196,33 +1196,175 @@ export class PGLiteEngine implements BrainEngine {
   // per-lang tree-sitter queries land in Layer 5/6.
   // ============================================================
 
-  async addCodeEdges(_edges: import('./types.ts').CodeEdgeInput[]): Promise<number> {
-    throw new Error('addCodeEdges: not implemented yet — lands in Cathedral II Layer 5 (A1 edge extractor)');
+  async addCodeEdges(edges: import('./types.ts').CodeEdgeInput[]): Promise<number> {
+    if (edges.length === 0) return 0;
+    let inserted = 0;
+    // Split into resolved vs unresolved. Resolved rows carry to_chunk_id
+    // (known target chunk); unresolved rows only know the qualified name.
+    const resolved = edges.filter(e => e.to_chunk_id != null);
+    const unresolved = edges.filter(e => e.to_chunk_id == null);
+
+    if (resolved.length > 0) {
+      const rowParts: string[] = [];
+      const params: unknown[] = [];
+      let p = 1;
+      for (const e of resolved) {
+        rowParts.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}::jsonb, $${p++})`);
+        params.push(
+          e.from_chunk_id, e.to_chunk_id, e.from_symbol_qualified,
+          e.to_symbol_qualified, e.edge_type,
+          JSON.stringify(e.edge_metadata ?? {}),
+          e.source_id ?? null,
+        );
+      }
+      const res = await this.db.query(
+        `INSERT INTO code_edges_chunk
+           (from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified, edge_type, edge_metadata, source_id)
+         VALUES ${rowParts.join(', ')}
+         ON CONFLICT (from_chunk_id, to_chunk_id, edge_type) DO NOTHING`,
+        params,
+      );
+      inserted += res.affectedRows ?? 0;
+    }
+    if (unresolved.length > 0) {
+      const rowParts: string[] = [];
+      const params: unknown[] = [];
+      let p = 1;
+      for (const e of unresolved) {
+        rowParts.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}::jsonb, $${p++})`);
+        params.push(
+          e.from_chunk_id, e.from_symbol_qualified, e.to_symbol_qualified, e.edge_type,
+          JSON.stringify(e.edge_metadata ?? {}),
+          e.source_id ?? null,
+        );
+      }
+      const res = await this.db.query(
+        `INSERT INTO code_edges_symbol
+           (from_chunk_id, from_symbol_qualified, to_symbol_qualified, edge_type, edge_metadata, source_id)
+         VALUES ${rowParts.join(', ')}
+         ON CONFLICT (from_chunk_id, to_symbol_qualified, edge_type) DO NOTHING`,
+        params,
+      );
+      inserted += res.affectedRows ?? 0;
+    }
+    return inserted;
   }
 
-  async deleteCodeEdgesForChunks(_chunkIds: number[]): Promise<void> {
-    throw new Error('deleteCodeEdgesForChunks: not implemented yet — lands in Cathedral II Layer 5/6');
+  async deleteCodeEdgesForChunks(chunkIds: number[]): Promise<void> {
+    if (chunkIds.length === 0) return;
+    // Both directions on code_edges_chunk; from-only on code_edges_symbol
+    // (unresolved edges don't have a to_chunk_id to match against).
+    await this.db.query(
+      `DELETE FROM code_edges_chunk WHERE from_chunk_id = ANY($1::int[]) OR to_chunk_id = ANY($1::int[])`,
+      [chunkIds],
+    );
+    await this.db.query(
+      `DELETE FROM code_edges_symbol WHERE from_chunk_id = ANY($1::int[])`,
+      [chunkIds],
+    );
   }
 
   async getCallersOf(
-    _qualifiedName: string,
-    _opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+    qualifiedName: string,
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number },
   ): Promise<import('./types.ts').CodeEdgeResult[]> {
-    throw new Error('getCallersOf: not implemented yet — lands in Cathedral II Layer 5');
+    const limit = Math.min(opts?.limit ?? 100, 500);
+    const sourceClause = opts?.allSources || !opts?.sourceId
+      ? ''
+      : `AND source_id = '${opts.sourceId.replace(/'/g, "''")}'`;
+    const { rows } = await this.db.query(
+      `SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, true as resolved
+         FROM code_edges_chunk
+         WHERE to_symbol_qualified = $1 ${sourceClause}
+       UNION ALL
+       SELECT id, from_chunk_id, NULL as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, false as resolved
+         FROM code_edges_symbol
+         WHERE to_symbol_qualified = $1 ${sourceClause}
+       LIMIT $2`,
+      [qualifiedName, limit],
+    );
+    return (rows as Record<string, unknown>[]).map(rowToCodeEdge);
   }
 
   async getCalleesOf(
-    _qualifiedName: string,
-    _opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+    qualifiedName: string,
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number },
   ): Promise<import('./types.ts').CodeEdgeResult[]> {
-    throw new Error('getCalleesOf: not implemented yet — lands in Cathedral II Layer 5');
+    const limit = Math.min(opts?.limit ?? 100, 500);
+    const sourceClause = opts?.allSources || !opts?.sourceId
+      ? ''
+      : `AND source_id = '${opts.sourceId.replace(/'/g, "''")}'`;
+    const { rows } = await this.db.query(
+      `SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, true as resolved
+         FROM code_edges_chunk
+         WHERE from_symbol_qualified = $1 ${sourceClause}
+       UNION ALL
+       SELECT id, from_chunk_id, NULL as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, false as resolved
+         FROM code_edges_symbol
+         WHERE from_symbol_qualified = $1 ${sourceClause}
+       LIMIT $2`,
+      [qualifiedName, limit],
+    );
+    return (rows as Record<string, unknown>[]).map(rowToCodeEdge);
   }
 
   async getEdgesByChunk(
-    _chunkId: number,
-    _opts?: { direction?: 'in' | 'out' | 'both'; edgeType?: string; limit?: number },
+    chunkId: number,
+    opts?: { direction?: 'in' | 'out' | 'both'; edgeType?: string; limit?: number },
   ): Promise<import('./types.ts').CodeEdgeResult[]> {
-    throw new Error('getEdgesByChunk: not implemented yet — lands in Cathedral II Layer 7 (A2 two-pass)');
+    const direction = opts?.direction ?? 'both';
+    const limit = Math.min(opts?.limit ?? 50, 200);
+    const edgeTypeClause = opts?.edgeType ? `AND edge_type = '${opts.edgeType.replace(/'/g, "''")}'` : '';
+    // Build the chunk-table filter based on direction. Unresolved edges
+    // (code_edges_symbol) only carry from_chunk_id — there's no inbound
+    // direction into them from a chunk ID, so we include them only when
+    // direction is 'out' or 'both'.
+    let chunkFilter = '';
+    if (direction === 'in') chunkFilter = `WHERE to_chunk_id = $1`;
+    else if (direction === 'out') chunkFilter = `WHERE from_chunk_id = $1`;
+    else chunkFilter = `WHERE from_chunk_id = $1 OR to_chunk_id = $1`;
+
+    let symbolFilter = '';
+    if (direction === 'out' || direction === 'both') {
+      symbolFilter = `WHERE from_chunk_id = $1`;
+    }
+
+    const unionClause = symbolFilter ? `
+      UNION ALL
+      SELECT id, from_chunk_id, NULL as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+             edge_type, edge_metadata, source_id, false as resolved
+        FROM code_edges_symbol
+        ${symbolFilter} ${edgeTypeClause}
+    ` : '';
+
+    const { rows } = await this.db.query(
+      `SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, true as resolved
+         FROM code_edges_chunk
+         ${chunkFilter} ${edgeTypeClause}
+       ${unionClause}
+       LIMIT $2`,
+      [chunkId, limit],
+    );
+    return (rows as Record<string, unknown>[]).map(rowToCodeEdge);
   }
 
+}
+
+function rowToCodeEdge(row: Record<string, unknown>): import('./types.ts').CodeEdgeResult {
+  return {
+    id: row.id as number,
+    from_chunk_id: row.from_chunk_id as number,
+    to_chunk_id: row.to_chunk_id == null ? null : (row.to_chunk_id as number),
+    from_symbol_qualified: (row.from_symbol_qualified as string) ?? '',
+    to_symbol_qualified: (row.to_symbol_qualified as string) ?? '',
+    edge_type: (row.edge_type as string) ?? '',
+    edge_metadata: (row.edge_metadata as Record<string, unknown>) ?? {},
+    source_id: row.source_id == null ? null : (row.source_id as string),
+    resolved: Boolean(row.resolved),
+  };
 }

@@ -19,6 +19,7 @@
  */
 
 import { chunkText as recursiveChunk } from './recursive.ts';
+import { buildQualifiedName } from './qualified-names.ts';
 
 // Embed the tree-sitter runtime + per-language grammars as files.
 // `with { type: 'file' }` returns a path (string) at runtime. Bun bundles
@@ -138,6 +139,17 @@ export interface CodeChunkMetadata {
    * embedding captures scope context.
    */
   parentSymbolPath?: string[];
+  /**
+   * v0.20.0 Cathedral II Layer 5 (A1): fully-qualified symbol identity for
+   * edge matching. Built by qualified-names.ts from language + symbolType
+   * + symbolName + parentSymbolPath. Examples:
+   *   Ruby:   Admin::UsersController#render
+   *   Python: admin.users_controller.UsersController.render
+   *   TS/JS:  BrainEngine.searchKeyword
+   *   Rust:   users::UsersController::render
+   * Null when symbolName is missing (merged chunks, module-level fallback).
+   */
+  symbolNameQualified?: string | null;
 }
 
 export interface CodeChunk {
@@ -447,12 +459,33 @@ export async function chunkCodeText(
   filePath: string,
   opts: CodeChunkOptions = {},
 ): Promise<CodeChunk[]> {
+  const result = await chunkCodeTextFull(source, filePath, opts);
+  return result.chunks;
+}
+
+/**
+ * v0.20.0 Cathedral II Layer 5 (A1): chunker + edge-extractor joint API.
+ * Returns chunks + per-file call-site edges. importCodeFile uses this
+ * shape so we don't re-parse the tree twice. Existing callers keep using
+ * chunkCodeText (backward-compatible wrapper above).
+ */
+export interface ChunkAndEdgeResult {
+  chunks: CodeChunk[];
+  /** Raw call edges — byte-offset resolution + chunk mapping happens in import-file.ts. */
+  edges: import('./edge-extractor.ts').ExtractedEdge[];
+}
+
+export async function chunkCodeTextFull(
+  source: string,
+  filePath: string,
+  opts: CodeChunkOptions = {},
+): Promise<ChunkAndEdgeResult> {
   const language = detectCodeLanguage(filePath);
   if (!language) {
-    return fallbackChunks(source, filePath, 'javascript', opts);
+    return { chunks: fallbackChunks(source, filePath, 'javascript', opts), edges: [] };
   }
 
-  if (!source.trim()) return [];
+  if (!source.trim()) return { chunks: [], edges: [] };
 
   const largeThreshold = opts.largeChunkThresholdTokens ?? 1000;
   const chunkTarget = opts.chunkSizeTokens ?? 300;
@@ -467,7 +500,7 @@ export async function chunkCodeText(
     const tree = parser.parse(source);
     if (!tree) {
       parser.delete();
-      return fallbackChunks(source, filePath, language, opts);
+      return { chunks: fallbackChunks(source, filePath, language, opts), edges: [] };
     }
 
     const root = tree.rootNode;
@@ -479,7 +512,7 @@ export async function chunkCodeText(
     if (semanticNodes.length === 0) {
       tree.delete();
       parser.delete();
-      return fallbackChunks(source, filePath, language, opts);
+      return { chunks: fallbackChunks(source, filePath, language, opts), edges: [] };
     }
 
     const chunks: CodeChunk[] = [];
@@ -551,15 +584,30 @@ export async function chunkCodeText(
       }
     }
 
+    // v0.20.0 Cathedral II Layer 5 (A1): harvest call-graph edges from the
+    // tree before we delete it. The extractor is iterative (no recursion);
+    // cost is ~O(n) on node count so adding this pass does not regress
+    // chunker throughput measurably.
+    let rawEdges: import('./edge-extractor.ts').ExtractedEdge[] = [];
+    try {
+      const { extractCallEdges } = await import('./edge-extractor.ts');
+      rawEdges = extractCallEdges(tree, language);
+    } catch {
+      // Edge extraction is best-effort — failure here must not break
+      // chunking. Syntactically invalid code or a grammar quirk should
+      // still get chunks.
+      rawEdges = [];
+    }
+
     tree.delete();
     parser.delete();
 
     if (chunks.length === 0) {
-      return fallbackChunks(source, filePath, language, opts);
+      return { chunks: fallbackChunks(source, filePath, language, opts), edges: rawEdges };
     }
-    return mergeSmallSiblings(chunks, chunkTarget);
+    return { chunks: mergeSmallSiblings(chunks, chunkTarget), edges: rawEdges };
   } catch {
-    return fallbackChunks(source, filePath, language, opts);
+    return { chunks: fallbackChunks(source, filePath, language, opts), edges: [] };
   }
 }
 
@@ -692,6 +740,14 @@ function buildChunk(input: {
     ? ` (in ${input.parentSymbolPath.join('.')})`
     : '';
   const header = `[${displayLang(input.language)}] ${input.filePath}:${input.startLine}-${input.endLine} ${symbol}${parentPath}`;
+  // v0.20.0 Cathedral II Layer 5 (A1): fold the qualified name into
+  // metadata so edge extraction has a stable identity key.
+  const qualified = buildQualifiedName({
+    language: input.language,
+    symbolName: input.symbolName,
+    symbolType: input.symbolType,
+    parentSymbolPath: input.parentSymbolPath ?? [],
+  });
   return {
     index: input.index,
     text: `${header}\n\n${input.body}`,
@@ -703,6 +759,7 @@ function buildChunk(input: {
       startLine: input.startLine,
       endLine: input.endLine,
       parentSymbolPath: input.parentSymbolPath ?? [],
+      symbolNameQualified: qualified,
     },
   };
 }

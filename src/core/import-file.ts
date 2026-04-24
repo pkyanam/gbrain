@@ -5,7 +5,8 @@ import { marked } from 'marked';
 import type { BrainEngine } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
-import { chunkCodeText, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
+import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
+import { findChunkForOffset } from './chunkers/edge-extractor.ts';
 import { extractCodeRefs } from './link-extraction.ts';
 import { embedBatch } from './embedding.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath } from './sync.ts';
@@ -415,7 +416,7 @@ export async function importCodeFile(
   // from the chunker (nested methods carry ['ClassName'] etc.) so the
   // chunk-grain FTS trigger picks up scope for ranking and downstream
   // Layer 5 edge resolution can use scope-qualified identity.
-  const codeChunks = await chunkCodeText(content, relativePath);
+  const { chunks: codeChunks, edges: extractedEdges } = await chunkCodeTextFull(content, relativePath);
   const chunks: ChunkInput[] = codeChunks.map((c, i) => ({
     chunk_index: i,
     chunk_text: c.text,
@@ -429,6 +430,7 @@ export async function importCodeFile(
       c.metadata.parentSymbolPath && c.metadata.parentSymbolPath.length > 0
         ? c.metadata.parentSymbolPath
         : undefined,
+    symbol_name_qualified: c.metadata.symbolNameQualified || undefined,
   }));
 
   // v0.19.0 E2 — incremental chunking. Embedding calls dominate the cost
@@ -495,6 +497,65 @@ export async function importCodeFile(
       await tx.deleteChunks(slug);
     }
   });
+
+  // v0.20.0 Cathedral II Layer 5 (A1): extracted call-site edges persist
+  // in code_edges_symbol (unresolved — we don't attempt within-file target
+  // resolution here; getCallersOf / getCalleesOf match on to_symbol_qualified
+  // which is the callee's short name). Edges land AFTER chunks upsert so
+  // chunk IDs are stable.
+  if (extractedEdges.length > 0 && chunks.length > 0) {
+    try {
+      const persistedChunks = await engine.getChunks(slug);
+      const byIndex = new Map<number, { id?: number; symbol_name_qualified?: string | null; start_line?: number | null; end_line?: number | null }>();
+      for (const pc of persistedChunks) {
+        byIndex.set(pc.chunk_index, pc);
+      }
+      // Per-chunk invalidation (codex SP-2): wipe old edges involving
+      // chunks whose IDs we know, so re-import doesn't leave stale
+      // edges pointing at old symbol names.
+      const chunkIds = persistedChunks
+        .map(c => c.id)
+        .filter((id): id is number => typeof id === 'number');
+      if (chunkIds.length > 0) {
+        await engine.deleteCodeEdgesForChunks(chunkIds);
+      }
+
+      // Build the chunk-range table for offset → chunk-id resolution.
+      const rangeList = chunks.map((ch, i) => {
+        const persisted = byIndex.get(i);
+        return {
+          id: persisted?.id as number | undefined,
+          startLine: ch.start_line ?? 1,
+          endLine: ch.end_line ?? 1,
+          symbol_name_qualified: ch.symbol_name_qualified ?? null,
+        };
+      });
+
+      const edgeInputs: import('./types.ts').CodeEdgeInput[] = [];
+      for (const e of extractedEdges) {
+        const idx = findChunkForOffset(e.callSiteByteOffset, content, rangeList);
+        if (idx == null) continue;
+        const from = rangeList[idx]!;
+        if (!from.id || !from.symbol_name_qualified) continue;
+        edgeInputs.push({
+          from_chunk_id: from.id,
+          to_chunk_id: null,
+          from_symbol_qualified: from.symbol_name_qualified,
+          to_symbol_qualified: e.toSymbol,
+          edge_type: e.edgeType,
+        });
+      }
+
+      if (edgeInputs.length > 0) {
+        await engine.addCodeEdges(edgeInputs);
+      }
+    } catch (edgeErr) {
+      // Edge persistence is best-effort. A failed addCodeEdges must not
+      // fail the overall import — the chunks + embeddings already
+      // landed, which is the primary value.
+      console.warn(`[gbrain] edge extraction failed for ${slug}: ${edgeErr instanceof Error ? edgeErr.message : String(edgeErr)}`);
+    }
+  }
 
   return { slug, status: 'imported', chunks: chunks.length };
 }
