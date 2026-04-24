@@ -212,6 +212,11 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Search
+  // v0.20.0 Cathedral II Layer 3 (1b): chunk-grain FTS internally,
+  // dedup-to-best-chunk-per-page on the way out. External shape
+  // preserves the v0.19.0 contract so backlinks / enrichment-service /
+  // list_pages etc. see zero breaking changes. A2 two-pass (Layer 7)
+  // consumes searchKeywordChunks for the raw chunk-grain primitive.
   async searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
     const sql = this.sql;
     const limit = clampSearchLimit(opts?.limit);
@@ -224,6 +229,10 @@ export class PostgresEngine implements BrainEngine {
     }
 
     const detailLow = opts?.detail === 'low';
+    // Fetch headroom for dedup: if we only fetch `limit` chunks, a cluster of
+    // co-occurring terms in one page can eat the entire result set and we'd
+    // ship < limit pages. 3x gives dedup enough to pick top N distinct pages.
+    const innerLimit = Math.min(limit * 3, MAX_SEARCH_LIMIT * 3);
 
     // Search-only timeout: prevents DoS via expensive queries without
     // affecting long-running operations like embed --all or bulk import.
@@ -235,32 +244,81 @@ export class PostgresEngine implements BrainEngine {
     // `SET statement_timeout = 0` — disables the guard for them.
     const rows = await sql.begin(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
-      // CTE: rank pages by FTS score, then pick the best chunk per page in SQL
+      // CTE chain: rank chunks by FTS → DISTINCT ON (slug) to pick best
+      // chunk per page → order by score → limit. The external shape is
+      // page-grain; chunk-grain ranking wins because A4 weights mean
+      // doc-comment hits (and, once Layer 5 populates them, qualified
+      // symbol hits) beat body-text hits at the chunk level.
       return await sql`
-        WITH ranked_pages AS (
-          SELECT p.id, p.slug, p.title, p.type,
-            ts_rank(p.search_vector, websearch_to_tsquery('english', ${query})) AS score
-          FROM pages p
-          WHERE p.search_vector @@ websearch_to_tsquery('english', ${query})
+        WITH ranked_chunks AS (
+          SELECT
+            p.slug, p.id as page_id, p.title, p.type, p.source_id,
+            cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+            ts_rank(cc.search_vector, websearch_to_tsquery('english', ${query})) AS score
+          FROM content_chunks cc
+          JOIN pages p ON p.id = cc.page_id
+          WHERE cc.search_vector @@ websearch_to_tsquery('english', ${query})
             ${type ? sql`AND p.type = ${type}` : sql``}
             ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
+            ${detailLow ? sql`AND cc.chunk_source = 'compiled_truth'` : sql``}
           ORDER BY score DESC
-          LIMIT ${limit}
-          OFFSET ${offset}
+          LIMIT ${innerLimit}
         ),
-        best_chunks AS (
-          SELECT DISTINCT ON (rp.slug)
-            rp.slug, rp.id as page_id, rp.title, rp.type, rp.score,
-            cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source
-          FROM ranked_pages rp
-          JOIN content_chunks cc ON cc.page_id = rp.id
-          ${detailLow ? sql`WHERE cc.chunk_source = 'compiled_truth'` : sql``}
-          ORDER BY rp.slug, cc.chunk_index
+        best_per_page AS (
+          SELECT DISTINCT ON (slug) *
+          FROM ranked_chunks
+          ORDER BY slug, score DESC
         )
-        SELECT slug, page_id, title, type, chunk_id, chunk_index, chunk_text, chunk_source, score,
+        SELECT slug, page_id, title, type, source_id,
+          chunk_id, chunk_index, chunk_text, chunk_source, score,
           false AS stale
-        FROM best_chunks
+        FROM best_per_page
         ORDER BY score DESC
+        LIMIT ${limit}
+        OFFSET ${offset}
+      `;
+    });
+    return rows.map(rowToSearchResult);
+  }
+
+  /**
+   * v0.20.0 Cathedral II Layer 3 (1b) chunk-grain keyword search.
+   * Ranks chunks via content_chunks.search_vector WITHOUT the
+   * dedup-to-page pass searchKeyword applies. Used by A2 two-pass
+   * retrieval (Layer 7) as the anchor-discovery primitive.
+   *
+   * Most callers should prefer searchKeyword (external page-grain
+   * contract). This is intentionally a narrow internal knob.
+   */
+  async searchKeywordChunks(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
+    const sql = this.sql;
+    const limit = clampSearchLimit(opts?.limit);
+    const offset = opts?.offset || 0;
+    const type = opts?.type;
+    const excludeSlugs = opts?.exclude_slugs;
+    const detailLow = opts?.detail === 'low';
+
+    if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
+      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
+    }
+
+    const rows = await sql.begin(async sql => {
+      await sql`SET LOCAL statement_timeout = '8s'`;
+      return await sql`
+        SELECT
+          p.slug, p.id as page_id, p.title, p.type, p.source_id,
+          cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+          ts_rank(cc.search_vector, websearch_to_tsquery('english', ${query})) AS score,
+          false AS stale
+        FROM content_chunks cc
+        JOIN pages p ON p.id = cc.page_id
+        WHERE cc.search_vector @@ websearch_to_tsquery('english', ${query})
+          ${type ? sql`AND p.type = ${type}` : sql``}
+          ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
+          ${detailLow ? sql`AND cc.chunk_source = 'compiled_truth'` : sql``}
+        ORDER BY score DESC
+        LIMIT ${limit}
+        OFFSET ${offset}
       `;
     });
     return rows.map(rowToSearchResult);
@@ -1166,7 +1224,4 @@ export class PostgresEngine implements BrainEngine {
     throw new Error('getEdgesByChunk: not implemented yet — lands in Cathedral II Layer 7 (A2 two-pass)');
   }
 
-  async searchKeywordChunks(_query: string, _opts?: SearchOpts): Promise<SearchResult[]> {
-    throw new Error('searchKeywordChunks: not implemented yet — lands in Cathedral II Layer 3 (1b chunk-grain FTS)');
-  }
 }

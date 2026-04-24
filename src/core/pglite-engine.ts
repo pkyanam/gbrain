@@ -214,7 +214,73 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Search
+  //
+  // v0.20.0 Cathedral II Layer 3 (1b): keyword search now ranks at
+  // chunk-grain internally using content_chunks.search_vector, then dedups
+  // to best-chunk-per-page on the way out. External shape (page-grain,
+  // one row per matched page, best chunk selected) is identical to
+  // v0.19.0 — backlinks, enrichment-service.countMentions, list_pages,
+  // etc. all see the same contract. A2 two-pass (Layer 7) consumes
+  // searchKeywordChunks for raw chunk-grain results without the dedup.
+  //
+  // The DISTINCT ON pattern is translated into a two-stage query because
+  // PGLite's query planner handles CTEs-with-DISTINCT-ON less optimally
+  // than direct window function + GROUP BY. Fetch more chunks than the
+  // page limit (3x) to ensure N dedup'd pages survive; bounded and fast.
   async searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
+    const limit = clampSearchLimit(opts?.limit);
+    const offset = opts?.offset || 0;
+    const detailFilter = opts?.detail === 'low' ? `AND cc.chunk_source = 'compiled_truth'` : '';
+
+    if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
+      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
+    }
+
+    // Fetch 3x to give dedup headroom, then page-dedup + re-limit.
+    const innerLimit = Math.min(limit * 3, MAX_SEARCH_LIMIT * 3);
+
+    const { rows } = await this.db.query(
+      `WITH ranked AS (
+         SELECT
+           p.slug, p.id as page_id, p.title, p.type, p.source_id,
+           cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+           ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) AS score,
+           CASE WHEN p.updated_at < (
+             SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
+           ) THEN true ELSE false END AS stale
+         FROM content_chunks cc
+         JOIN pages p ON p.id = cc.page_id
+         WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
+         ORDER BY score DESC
+         LIMIT $2
+       ),
+       best_per_page AS (
+         SELECT DISTINCT ON (slug) *
+         FROM ranked
+         ORDER BY slug, score DESC
+       )
+       SELECT * FROM best_per_page
+       ORDER BY score DESC
+       LIMIT $3 OFFSET $4`,
+      [query, innerLimit, limit, offset]
+    );
+
+    return (rows as Record<string, unknown>[]).map(rowToSearchResult);
+  }
+
+  /**
+   * v0.20.0 Cathedral II Layer 3 (1b) chunk-grain keyword search.
+   *
+   * Ranks at chunk grain via content_chunks.search_vector WITHOUT the
+   * dedup-to-page pass that searchKeyword applies on return. Used by
+   * A2 two-pass retrieval (Layer 7) as the anchor-discovery primitive:
+   * two-pass wants the top-N chunks (regardless of page), not the
+   * best chunk per top-N pages.
+   *
+   * Most callers should prefer searchKeyword (external page-grain
+   * contract). This method is intentionally a narrow internal knob.
+   */
+  async searchKeywordChunks(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
     const limit = clampSearchLimit(opts?.limit);
     const offset = opts?.offset || 0;
     const detailFilter = opts?.detail === 'low' ? `AND cc.chunk_source = 'compiled_truth'` : '';
@@ -225,18 +291,17 @@ export class PGLiteEngine implements BrainEngine {
 
     const { rows } = await this.db.query(
       `SELECT
-        p.slug, p.id as page_id, p.title, p.type, p.source_id,
-        cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-        ts_rank(p.search_vector, websearch_to_tsquery('english', $1)) AS score,
-        CASE WHEN p.updated_at < (
-          SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
-        ) THEN true ELSE false END AS stale
-      FROM pages p
-      JOIN content_chunks cc ON cc.page_id = p.id
-      WHERE p.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
-      ORDER BY score DESC
-      LIMIT $2
-      OFFSET $3`,
+         p.slug, p.id as page_id, p.title, p.type, p.source_id,
+         cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+         ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) AS score,
+         CASE WHEN p.updated_at < (
+           SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
+         ) THEN true ELSE false END AS stale
+       FROM content_chunks cc
+       JOIN pages p ON p.id = cc.page_id
+       WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
+       ORDER BY score DESC
+       LIMIT $2 OFFSET $3`,
       [query, limit, offset]
     );
 
@@ -1115,7 +1180,4 @@ export class PGLiteEngine implements BrainEngine {
     throw new Error('getEdgesByChunk: not implemented yet — lands in Cathedral II Layer 7 (A2 two-pass)');
   }
 
-  async searchKeywordChunks(_query: string, _opts?: SearchOpts): Promise<SearchResult[]> {
-    throw new Error('searchKeywordChunks: not implemented yet — lands in Cathedral II Layer 3 (1b chunk-grain FTS)');
-  }
 }

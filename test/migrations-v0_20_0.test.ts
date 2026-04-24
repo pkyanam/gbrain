@@ -98,8 +98,15 @@ describe('v0.20.0 Cathedral II — Layer 1 Foundation', () => {
     expect(v27!.sql).toMatch(/DROP TRIGGER IF EXISTS chunk_search_vector_trigger/);
   });
 
-  test('v27 is highest migration version (Cathedral II is next after v0.19.0 v26)', () => {
+  test('Cathedral II Layer 1 registers migration v27 at or below the current head', () => {
+    // Cathedral II adds additional migrations in later layers (v28 for the
+    // Layer 3 chunk-FTS backfill, etc.). Assert v27 exists and is the
+    // foundation migration, but don't pin "v27 is the latest" since the
+    // MIGRATIONS array grows as Cathedral II layers land.
+    const v27 = MIGRATIONS.find(m => m.version === 27);
+    expect(v27).toBeDefined();
+    expect(v27!.name).toBe('cathedral_ii_foundation');
     const maxVersion = Math.max(...MIGRATIONS.map(m => m.version));
-    expect(maxVersion).toBe(27);
+    expect(maxVersion).toBeGreaterThanOrEqual(27);
   });
 });
