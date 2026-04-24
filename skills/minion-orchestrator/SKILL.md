@@ -285,7 +285,7 @@ Total tokens so far: 4.3k
 - Don't spawn a Minion for a single search query (use search tool directly)
 - Don't fire-and-forget without checking results
 - Don't spawn > 5 concurrent agents without checking `gbrain jobs stats` first
-- Don't use `sessions_spawn` with `runtime: "subagent"` when Minions is available
+- For subagent work, don't use `sessions_spawn` with `runtime: "subagent"` when Minions is available (use `gbrain agent run` instead)
 - Don't poll `get_job` in a tight loop (use `get_job_progress` for lightweight checks)
 
 ## Tools Used
