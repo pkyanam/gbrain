@@ -31,6 +31,7 @@ import { join, dirname } from 'path';
 import { loadConfig, toEngineConfig } from '../core/config.ts';
 import { createEngine } from '../core/engine-factory.ts';
 import type { BrainEngine } from '../core/engine.ts';
+import * as db from '../core/db.ts';
 import { BrainWriter } from '../core/output/writer.ts';
 import {
   getDefaultRegistry,
@@ -266,6 +267,12 @@ export interface IntegrityScanOptions {
   limit?: number;
   /** Slug prefix filter (e.g. "people") — matches slugs starting with `${typeFilter}/`. */
   typeFilter?: string;
+  /**
+   * When true (default), batch-load pages via a single SQL query instead of
+   * sequential getPage() calls. Falls back to sequential on error (e.g. PGLite).
+   * Eliminates 500 round-trips through PgBouncer that caused doctor timeouts.
+   */
+  batchLoad?: boolean;
 }
 
 export interface IntegrityScanResult {
@@ -287,7 +294,19 @@ export async function scanIntegrity(
   engine: BrainEngine,
   opts: IntegrityScanOptions = {},
 ): Promise<IntegrityScanResult> {
-  const { limit = Infinity, typeFilter } = opts;
+  const { limit = Infinity, typeFilter, batchLoad = true } = opts;
+
+  // Fast path: single SQL query instead of N sequential getPage() calls.
+  // This eliminates ~500 round-trips through PgBouncer that caused doctor
+  // to timeout on deployments using transaction-mode connection pooling.
+  if (batchLoad && limit !== Infinity) {
+    try {
+      return await scanIntegrityBatch(limit, typeFilter);
+    } catch {
+      // Fall through to sequential path (e.g. PGLite, no DB connection)
+    }
+  }
+
   const allSlugs = [...(await engine.getAllSlugs())].sort();
 
   const bareHits: BareTweetHit[] = [];
@@ -314,6 +333,46 @@ export async function scanIntegrity(
     .map(([slug, count]) => ({ slug, count }));
 
   return { pagesScanned, bareHits, externalHits, topPages };
+}
+
+/**
+ * Batch-load integrity scan: fetches all candidate pages in a single SQL
+ * query, then scans in-memory. Reduces PgBouncer round-trips from ~500 to 1.
+ */
+async function scanIntegrityBatch(
+  limit: number,
+  typeFilter?: string,
+): Promise<IntegrityScanResult> {
+  const sql = db.getConnection();
+  const typeCondition = typeFilter ? sql`AND slug LIKE ${typeFilter + '/%'}` : sql``;
+  const validateCondition = sql`AND (frontmatter->>'validate' IS NULL OR frontmatter->>'validate' != 'false')`;
+
+  const rows = await sql`
+    SELECT slug, compiled_truth, frontmatter
+    FROM pages
+    WHERE 1=1 ${typeCondition} ${validateCondition}
+    ORDER BY slug
+    LIMIT ${limit}
+  `;
+
+  const bareHits: BareTweetHit[] = [];
+  const externalHits: ExternalLinkHit[] = [];
+
+  for (const row of rows) {
+    const slug = row.slug as string;
+    const compiledTruth = row.compiled_truth as string;
+    bareHits.push(...findBareTweetHits(compiledTruth, slug));
+    externalHits.push(...findExternalLinks(compiledTruth, slug));
+  }
+
+  const byPage = new Map<string, number>();
+  for (const h of bareHits) byPage.set(h.slug, (byPage.get(h.slug) ?? 0) + 1);
+  const topPages = [...byPage.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([slug, count]) => ({ slug, count }));
+
+  return { pagesScanned: rows.length, bareHits, externalHits, topPages };
 }
 
 // ---------------------------------------------------------------------------
