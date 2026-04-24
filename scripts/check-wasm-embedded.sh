@@ -31,22 +31,29 @@ bun build --compile --outfile "$OUT_BIN" scripts/chunker-smoketest.ts >/dev/null
 OUTPUT="$("$OUT_BIN" 2>&1)"
 
 # Sanity: JSON parses and has expected shape.
-if ! echo "$OUTPUT" | grep -q '"has_real_symbols": true'; then
-  echo "[check-wasm-embedded] FAIL: compiled binary returned fallback chunks." >&2
+# - has_symbol_names: at least one chunk carries a concrete symbol name
+#   (proves tree-sitter AST extraction, not recursive-fallback chunks).
+# - has_typescript_header: the structured header is emitted with the
+#   correct language tag (proves the language map reached displayLang).
+# - calculateScore by name: specific function that MUST appear as a
+#   top-level semantic node. If it's missing, the chunker either fell
+#   through to recursive or the TypeScript grammar didn't load.
+if ! echo "$OUTPUT" | grep -q '"has_symbol_names": true'; then
+  echo "[check-wasm-embedded] FAIL: compiled binary returned no symbol names (fallback chunks)." >&2
   echo "[check-wasm-embedded] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1
 fi
 
-if ! echo "$OUTPUT" | grep -q '"first_header": "\[TypeScript\]'; then
-  echo "[check-wasm-embedded] FAIL: chunk header missing language tag." >&2
+if ! echo "$OUTPUT" | grep -q '"has_typescript_header": true'; then
+  echo "[check-wasm-embedded] FAIL: chunk header missing TypeScript language tag." >&2
   echo "[check-wasm-embedded] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1
 fi
 
-if ! echo "$OUTPUT" | grep -q '"symbolName": "hello"'; then
-  echo "[check-wasm-embedded] FAIL: tree-sitter did not extract symbol name." >&2
+if ! echo "$OUTPUT" | grep -q '"calculateScore"'; then
+  echo "[check-wasm-embedded] FAIL: tree-sitter did not extract the calculateScore function symbol." >&2
   echo "[check-wasm-embedded] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1

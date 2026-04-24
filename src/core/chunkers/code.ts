@@ -27,23 +27,76 @@ import { chunkText as recursiveChunk } from './recursive.ts';
 // uses a bundler-synthesized path.
 // @ts-ignore — type: 'file' import attribute is valid Bun syntax, not in lib.d.ts
 import TREE_SITTER_WASM from '../../assets/wasm/tree-sitter.wasm' with { type: 'file' };
+// 36 grammars total. Every grammar ships in the compiled binary — Bun's
+// --compile bundles each referenced asset. Layer 5 extends the 6 baseline
+// languages to all 36 tree-sitter-wasms ship.
 // @ts-ignore
-import GRAMMAR_TYPESCRIPT from '../../assets/wasm/grammars/tree-sitter-typescript.wasm' with { type: 'file' };
+import G_BASH from '../../assets/wasm/grammars/tree-sitter-bash.wasm' with { type: 'file' };
 // @ts-ignore
-import GRAMMAR_TSX from '../../assets/wasm/grammars/tree-sitter-tsx.wasm' with { type: 'file' };
+import G_C from '../../assets/wasm/grammars/tree-sitter-c.wasm' with { type: 'file' };
 // @ts-ignore
-import GRAMMAR_JAVASCRIPT from '../../assets/wasm/grammars/tree-sitter-javascript.wasm' with { type: 'file' };
+import G_CSHARP from '../../assets/wasm/grammars/tree-sitter-c_sharp.wasm' with { type: 'file' };
 // @ts-ignore
-import GRAMMAR_PYTHON from '../../assets/wasm/grammars/tree-sitter-python.wasm' with { type: 'file' };
+import G_CPP from '../../assets/wasm/grammars/tree-sitter-cpp.wasm' with { type: 'file' };
 // @ts-ignore
-import GRAMMAR_RUBY from '../../assets/wasm/grammars/tree-sitter-ruby.wasm' with { type: 'file' };
+import G_CSS from '../../assets/wasm/grammars/tree-sitter-css.wasm' with { type: 'file' };
 // @ts-ignore
-import GRAMMAR_GO from '../../assets/wasm/grammars/tree-sitter-go.wasm' with { type: 'file' };
+import G_DART from '../../assets/wasm/grammars/tree-sitter-dart.wasm' with { type: 'file' };
+// @ts-ignore
+import G_ELIXIR from '../../assets/wasm/grammars/tree-sitter-elixir.wasm' with { type: 'file' };
+// @ts-ignore
+import G_ELM from '../../assets/wasm/grammars/tree-sitter-elm.wasm' with { type: 'file' };
+// @ts-ignore
+import G_GO from '../../assets/wasm/grammars/tree-sitter-go.wasm' with { type: 'file' };
+// @ts-ignore
+import G_HTML from '../../assets/wasm/grammars/tree-sitter-html.wasm' with { type: 'file' };
+// @ts-ignore
+import G_JAVA from '../../assets/wasm/grammars/tree-sitter-java.wasm' with { type: 'file' };
+// @ts-ignore
+import G_JAVASCRIPT from '../../assets/wasm/grammars/tree-sitter-javascript.wasm' with { type: 'file' };
+// @ts-ignore
+import G_JSON from '../../assets/wasm/grammars/tree-sitter-json.wasm' with { type: 'file' };
+// @ts-ignore
+import G_KOTLIN from '../../assets/wasm/grammars/tree-sitter-kotlin.wasm' with { type: 'file' };
+// @ts-ignore
+import G_LUA from '../../assets/wasm/grammars/tree-sitter-lua.wasm' with { type: 'file' };
+// @ts-ignore
+import G_OCAML from '../../assets/wasm/grammars/tree-sitter-ocaml.wasm' with { type: 'file' };
+// @ts-ignore
+import G_PHP from '../../assets/wasm/grammars/tree-sitter-php.wasm' with { type: 'file' };
+// @ts-ignore
+import G_PYTHON from '../../assets/wasm/grammars/tree-sitter-python.wasm' with { type: 'file' };
+// @ts-ignore
+import G_RUBY from '../../assets/wasm/grammars/tree-sitter-ruby.wasm' with { type: 'file' };
+// @ts-ignore
+import G_RUST from '../../assets/wasm/grammars/tree-sitter-rust.wasm' with { type: 'file' };
+// @ts-ignore
+import G_SCALA from '../../assets/wasm/grammars/tree-sitter-scala.wasm' with { type: 'file' };
+// @ts-ignore
+import G_SOLIDITY from '../../assets/wasm/grammars/tree-sitter-solidity.wasm' with { type: 'file' };
+// @ts-ignore
+import G_SWIFT from '../../assets/wasm/grammars/tree-sitter-swift.wasm' with { type: 'file' };
+// @ts-ignore
+import G_TOML from '../../assets/wasm/grammars/tree-sitter-toml.wasm' with { type: 'file' };
+// @ts-ignore
+import G_TSX from '../../assets/wasm/grammars/tree-sitter-tsx.wasm' with { type: 'file' };
+// @ts-ignore
+import G_TYPESCRIPT from '../../assets/wasm/grammars/tree-sitter-typescript.wasm' with { type: 'file' };
+// @ts-ignore
+import G_VUE from '../../assets/wasm/grammars/tree-sitter-vue.wasm' with { type: 'file' };
+// @ts-ignore
+import G_YAML from '../../assets/wasm/grammars/tree-sitter-yaml.wasm' with { type: 'file' };
+// @ts-ignore
+import G_ZIG from '../../assets/wasm/grammars/tree-sitter-zig.wasm' with { type: 'file' };
 
 // Bumped whenever chunker output shape changes (new tokenizer, merge-threshold,
 // language set, etc.) so importCodeFile's content_hash re-chunks existing pages
 // after a gbrain upgrade. See A2 / C2 in the v0.19.0 plan.
-export const CHUNKER_VERSION = 2;
+//
+// v3: Chonkie parity (Layer 5) — 36 languages + tiktoken cl100k_base tokenizer
+// + small-sibling merging. Every v0.18.0 brain with code pages re-chunks on
+// next sync because the chunk sizes + symbol boundaries shift.
+export const CHUNKER_VERSION = 3;
 
 // Lazy-loaded tree-sitter module (v0.22.x API: Parser is default export)
 let Parser: typeof import('web-tree-sitter') | null = null;
@@ -55,7 +108,11 @@ async function getParser(): Promise<typeof import('web-tree-sitter')> {
   return Parser;
 }
 
-export type SupportedCodeLanguage = 'typescript' | 'tsx' | 'javascript' | 'python' | 'ruby' | 'go';
+export type SupportedCodeLanguage =
+  | 'typescript' | 'tsx' | 'javascript' | 'python' | 'ruby' | 'go'
+  | 'rust' | 'java' | 'c_sharp' | 'cpp' | 'c' | 'php' | 'swift' | 'kotlin'
+  | 'scala' | 'lua' | 'elixir' | 'elm' | 'ocaml' | 'dart' | 'zig' | 'solidity'
+  | 'bash' | 'css' | 'html' | 'vue' | 'json' | 'yaml' | 'toml';
 
 export interface CodeChunkMetadata {
   symbolName: string | null;
@@ -82,65 +139,75 @@ export interface CodeChunkOptions {
 // Map each supported language to its embedded-asset path (resolved by Bun).
 // At runtime, these are file paths the tree-sitter runtime can read.
 const GRAMMAR_PATHS: Record<SupportedCodeLanguage, string> = {
-  typescript: GRAMMAR_TYPESCRIPT,
-  tsx: GRAMMAR_TSX,
-  javascript: GRAMMAR_JAVASCRIPT,
-  python: GRAMMAR_PYTHON,
-  ruby: GRAMMAR_RUBY,
-  go: GRAMMAR_GO,
+  typescript: G_TYPESCRIPT, tsx: G_TSX, javascript: G_JAVASCRIPT,
+  python: G_PYTHON, ruby: G_RUBY, go: G_GO,
+  rust: G_RUST, java: G_JAVA, c_sharp: G_CSHARP, cpp: G_CPP, c: G_C,
+  php: G_PHP, swift: G_SWIFT, kotlin: G_KOTLIN, scala: G_SCALA, lua: G_LUA,
+  elixir: G_ELIXIR, elm: G_ELM, ocaml: G_OCAML, dart: G_DART, zig: G_ZIG,
+  solidity: G_SOLIDITY, bash: G_BASH, css: G_CSS, html: G_HTML, vue: G_VUE,
+  json: G_JSON, yaml: G_YAML, toml: G_TOML,
 };
 
-const TOP_LEVEL_TYPES: Record<SupportedCodeLanguage, Set<string>> = {
+// Per-language top-level AST node types that count as semantic units.
+// Languages not in this map fall through to the recursive text chunker
+// when the grammar loads but no semantic nodes match — correct behavior.
+const TOP_LEVEL_TYPES: Partial<Record<SupportedCodeLanguage, Set<string>>> = {
   typescript: new Set([
-    'function_declaration',
-    'class_declaration',
-    'abstract_class_declaration',
-    'interface_declaration',
-    'type_alias_declaration',
-    'enum_declaration',
-    'lexical_declaration',
-    'variable_declaration',
-    'export_statement',
+    'function_declaration', 'class_declaration', 'abstract_class_declaration',
+    'interface_declaration', 'type_alias_declaration', 'enum_declaration',
+    'lexical_declaration', 'variable_declaration', 'export_statement',
   ]),
   tsx: new Set([
-    'function_declaration',
-    'class_declaration',
-    'interface_declaration',
-    'type_alias_declaration',
-    'enum_declaration',
-    'lexical_declaration',
-    'variable_declaration',
-    'export_statement',
+    'function_declaration', 'class_declaration', 'interface_declaration',
+    'type_alias_declaration', 'enum_declaration', 'lexical_declaration',
+    'variable_declaration', 'export_statement',
   ]),
   javascript: new Set([
-    'function_declaration',
-    'class_declaration',
-    'lexical_declaration',
-    'variable_declaration',
-    'export_statement',
+    'function_declaration', 'class_declaration', 'lexical_declaration',
+    'variable_declaration', 'export_statement',
   ]),
   python: new Set([
-    'function_definition',
-    'class_definition',
-    'import_statement',
-    'import_from_statement',
-    'assignment',
+    'function_definition', 'class_definition',
+    'import_statement', 'import_from_statement', 'assignment',
   ]),
-  ruby: new Set([
-    'class',
-    'module',
-    'method',
-    'singleton_method',
-    'assignment',
-  ]),
+  ruby: new Set(['class', 'module', 'method', 'singleton_method', 'assignment']),
   go: new Set([
-    'function_declaration',
-    'method_declaration',
-    'type_declaration',
-    'const_declaration',
-    'var_declaration',
-    'import_declaration',
+    'function_declaration', 'method_declaration', 'type_declaration',
+    'const_declaration', 'var_declaration', 'import_declaration',
   ]),
+  rust: new Set([
+    'function_item', 'impl_item', 'struct_item', 'enum_item', 'trait_item',
+    'mod_item', 'type_item', 'const_item', 'static_item', 'use_declaration',
+  ]),
+  java: new Set([
+    'method_declaration', 'class_declaration', 'interface_declaration',
+    'enum_declaration', 'record_declaration', 'import_declaration',
+    'package_declaration',
+  ]),
+  c_sharp: new Set([
+    'method_declaration', 'class_declaration', 'interface_declaration',
+    'struct_declaration', 'enum_declaration', 'namespace_declaration',
+    'using_directive', 'property_declaration',
+  ]),
+  cpp: new Set([
+    'function_definition', 'class_specifier', 'struct_specifier',
+    'namespace_definition', 'declaration', 'template_declaration',
+  ]),
+  c: new Set(['function_definition', 'struct_specifier', 'declaration', 'preproc_def', 'preproc_include']),
+  php: new Set([
+    'function_definition', 'class_declaration', 'interface_declaration',
+    'method_declaration', 'trait_declaration',
+  ]),
+  swift: new Set([
+    'function_declaration', 'class_declaration', 'struct_declaration',
+    'protocol_declaration', 'enum_declaration', 'import_declaration',
+  ]),
+  kotlin: new Set(['function_declaration', 'class_declaration', 'property_declaration', 'object_declaration']),
+  scala: new Set(['function_definition', 'class_definition', 'object_definition', 'trait_definition']),
+  lua: new Set(['function_declaration', 'function_definition', 'local_declaration']),
+  elixir: new Set(['call']),
+  bash: new Set(['function_definition', 'variable_assignment']),
+  solidity: new Set(['contract_declaration', 'function_definition', 'modifier_definition', 'event_definition']),
 };
 
 const BODY_NODE_TYPES = new Set([
@@ -160,12 +227,36 @@ const languageCache = new Map<SupportedCodeLanguage, any>();
 
 export function detectCodeLanguage(filePath: string): SupportedCodeLanguage | null {
   const lower = filePath.toLowerCase();
+  // TSX + JSX take precedence over their base language.
   if (lower.endsWith('.tsx')) return 'tsx';
-  if (lower.endsWith('.ts')) return 'typescript';
+  if (lower.endsWith('.ts') || lower.endsWith('.mts') || lower.endsWith('.cts')) return 'typescript';
   if (lower.endsWith('.js') || lower.endsWith('.jsx') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) return 'javascript';
   if (lower.endsWith('.py')) return 'python';
   if (lower.endsWith('.rb')) return 'ruby';
   if (lower.endsWith('.go')) return 'go';
+  if (lower.endsWith('.rs')) return 'rust';
+  if (lower.endsWith('.java')) return 'java';
+  if (lower.endsWith('.cs')) return 'c_sharp';
+  if (lower.endsWith('.cpp') || lower.endsWith('.cc') || lower.endsWith('.cxx') || lower.endsWith('.hpp') || lower.endsWith('.hxx') || lower.endsWith('.hh')) return 'cpp';
+  if (lower.endsWith('.c') || lower.endsWith('.h')) return 'c';
+  if (lower.endsWith('.php')) return 'php';
+  if (lower.endsWith('.swift')) return 'swift';
+  if (lower.endsWith('.kt') || lower.endsWith('.kts')) return 'kotlin';
+  if (lower.endsWith('.scala') || lower.endsWith('.sc')) return 'scala';
+  if (lower.endsWith('.lua')) return 'lua';
+  if (lower.endsWith('.ex') || lower.endsWith('.exs')) return 'elixir';
+  if (lower.endsWith('.elm')) return 'elm';
+  if (lower.endsWith('.ml') || lower.endsWith('.mli')) return 'ocaml';
+  if (lower.endsWith('.dart')) return 'dart';
+  if (lower.endsWith('.zig')) return 'zig';
+  if (lower.endsWith('.sol')) return 'solidity';
+  if (lower.endsWith('.sh') || lower.endsWith('.bash')) return 'bash';
+  if (lower.endsWith('.css')) return 'css';
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'html';
+  if (lower.endsWith('.vue')) return 'vue';
+  if (lower.endsWith('.json')) return 'json';
+  if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'yaml';
+  if (lower.endsWith('.toml')) return 'toml';
   return null;
 }
 
@@ -199,7 +290,9 @@ export async function chunkCodeText(
 
     const root = tree.rootNode;
     const topLevelTypes = TOP_LEVEL_TYPES[language];
-    const semanticNodes = root.namedChildren.filter((n: any) => topLevelTypes.has(n.type));
+    const semanticNodes = topLevelTypes
+      ? root.namedChildren.filter((n: any) => topLevelTypes.has(n.type))
+      : [];
 
     if (semanticNodes.length === 0) {
       tree.delete();
@@ -250,10 +343,87 @@ export async function chunkCodeText(
     tree.delete();
     parser.delete();
 
-    return chunks.length > 0 ? chunks : fallbackChunks(source, filePath, language, opts);
+    if (chunks.length === 0) {
+      return fallbackChunks(source, filePath, language, opts);
+    }
+    return mergeSmallSiblings(chunks, chunkTarget);
   } catch {
     return fallbackChunks(source, filePath, language, opts);
   }
+}
+
+/**
+ * Post-pass that merges adjacent small chunks into larger chunks up to
+ * `chunkTarget` tokens. Mirrors Chonkie's bisect_left approach: scan
+ * chunks left-to-right, extend the current merge group with the next
+ * chunk if doing so stays under the budget, otherwise close the group.
+ *
+ * Why: tree-sitter emits one chunk per top-level node. For languages
+ * with many tiny declarations (Go imports, Python from-imports, JS
+ * top-level consts), each chunk ends up 5-20 tokens and the embedding
+ * cost dominates without any retrieval quality benefit. Merging lets
+ * the chunker respect the user's chunkSizeTokens budget instead of
+ * letting the file's AST dictate it.
+ *
+ * Merged chunks lose their individual symbolName (set to null) and
+ * get symbolType='merged'. The header shows the line range of the
+ * merged group. Single-chunk groups pass through unchanged.
+ */
+function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk[] {
+  if (chunks.length <= 1) return chunks;
+  const mergeThreshold = Math.floor(chunkTarget * 0.4); // consider chunks under 40% of target "small"
+  const merged: CodeChunk[] = [];
+  let i = 0;
+  while (i < chunks.length) {
+    const current = chunks[i]!;
+    const currentTokens = estimateTokens(current.text);
+    if (currentTokens >= mergeThreshold) {
+      merged.push({ ...current, index: merged.length });
+      i++;
+      continue;
+    }
+    // Accumulate adjacent small chunks
+    const group: CodeChunk[] = [current];
+    let groupTokens = currentTokens;
+    let j = i + 1;
+    while (j < chunks.length) {
+      const next = chunks[j]!;
+      const nextTokens = estimateTokens(next.text);
+      if (groupTokens + nextTokens > chunkTarget) break;
+      group.push(next);
+      groupTokens += nextTokens;
+      j++;
+    }
+    if (group.length === 1) {
+      merged.push({ ...current, index: merged.length });
+    } else {
+      merged.push(buildMergedChunk(group, merged.length));
+    }
+    i = j;
+  }
+  return merged;
+}
+
+function buildMergedChunk(group: CodeChunk[], index: number): CodeChunk {
+  const first = group[0]!;
+  const last = group[group.length - 1]!;
+  // Strip each chunk's structured header line when merging so the combined
+  // body reads like the original source. Header is always "[Lang] path:N-M symbol".
+  const bodies = group.map((c) => c.text.replace(/^\[[^\]]+\] [^\n]+\n\n/, ''));
+  const mergedBody = bodies.join('\n\n');
+  const header = `[${displayLang(first.metadata.language)}] ${first.metadata.filePath}:${first.metadata.startLine}-${last.metadata.endLine} merged (${group.length} siblings)`;
+  return {
+    index,
+    text: `${header}\n\n${mergedBody}`,
+    metadata: {
+      symbolName: null,
+      symbolType: 'merged',
+      filePath: first.metadata.filePath,
+      language: first.metadata.language,
+      startLine: first.metadata.startLine,
+      endLine: last.metadata.endLine,
+    },
+  };
 }
 
 // ---------- Internals ----------
@@ -382,16 +552,44 @@ function sanitize(name: string): string {
   return name.replace(/[\n\r\t]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// v0.19.0 (Layer 5): accurate token count via @dqbd/tiktoken cl100k_base,
+// the same encoder text-embedding-3-large uses. The old len/4 heuristic was
+// 2-3x off for code. Lazy-init so dev and compiled-binary both only pay
+// the init cost once. Falls back to the heuristic if the encoder fails
+// to load (vanishingly unlikely but keeps the chunker available).
+let tiktokenEncoder: { encode: (s: string) => Uint32Array; free: () => void } | null = null;
+let tiktokenInitialized = false;
+
 function estimateTokens(text: string): number {
+  if (!text) return 0;
+  if (!tiktokenInitialized) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const m = require('@dqbd/tiktoken');
+      tiktokenEncoder = m.get_encoding('cl100k_base');
+    } catch {
+      tiktokenEncoder = null;
+    }
+    tiktokenInitialized = true;
+  }
+  if (tiktokenEncoder) {
+    return tiktokenEncoder.encode(text).length;
+  }
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
+const DISPLAY_LANG: Record<SupportedCodeLanguage, string> = {
+  typescript: 'TypeScript', tsx: 'TSX', javascript: 'JavaScript',
+  python: 'Python', ruby: 'Ruby', go: 'Go', rust: 'Rust', java: 'Java',
+  c_sharp: 'C#', cpp: 'C++', c: 'C', php: 'PHP', swift: 'Swift',
+  kotlin: 'Kotlin', scala: 'Scala', lua: 'Lua', elixir: 'Elixir',
+  elm: 'Elm', ocaml: 'OCaml', dart: 'Dart', zig: 'Zig', solidity: 'Solidity',
+  bash: 'Bash', css: 'CSS', html: 'HTML', vue: 'Vue', json: 'JSON',
+  yaml: 'YAML', toml: 'TOML',
+};
+
 function displayLang(lang: SupportedCodeLanguage): string {
-  const map: Record<SupportedCodeLanguage, string> = {
-    typescript: 'TypeScript', tsx: 'TSX', javascript: 'JavaScript',
-    python: 'Python', ruby: 'Ruby', go: 'Go',
-  };
-  return map[lang];
+  return DISPLAY_LANG[lang];
 }
 
 function countLines(text: string): number {
