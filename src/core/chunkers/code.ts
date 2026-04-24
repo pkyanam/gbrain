@@ -9,9 +9,41 @@
  *
  * Supports: TypeScript, TSX, JavaScript, Python, Ruby, Go.
  * Falls back to recursive text chunker for unsupported languages.
+ *
+ * WASM loading (v0.19.0, Layer 2):
+ * Uses Bun's embedded-asset pattern via `import ... with { type: 'file' }`.
+ * WASMs live at `src/assets/wasm/` and are committed to the repo. At
+ * `bun --compile` time, Bun bundles them into the binary. In dev, the
+ * imports resolve to the repo paths directly. No node_modules dependency
+ * at runtime.
  */
 
 import { chunkText as recursiveChunk } from './recursive.ts';
+
+// Embed the tree-sitter runtime + per-language grammars as files.
+// `with { type: 'file' }` returns a path (string) at runtime. Bun bundles
+// the referenced file into the compiled binary during `bun build --compile`.
+// In dev, the path resolves to the source-tree file; the compiled binary
+// uses a bundler-synthesized path.
+// @ts-ignore — type: 'file' import attribute is valid Bun syntax, not in lib.d.ts
+import TREE_SITTER_WASM from '../../assets/wasm/tree-sitter.wasm' with { type: 'file' };
+// @ts-ignore
+import GRAMMAR_TYPESCRIPT from '../../assets/wasm/grammars/tree-sitter-typescript.wasm' with { type: 'file' };
+// @ts-ignore
+import GRAMMAR_TSX from '../../assets/wasm/grammars/tree-sitter-tsx.wasm' with { type: 'file' };
+// @ts-ignore
+import GRAMMAR_JAVASCRIPT from '../../assets/wasm/grammars/tree-sitter-javascript.wasm' with { type: 'file' };
+// @ts-ignore
+import GRAMMAR_PYTHON from '../../assets/wasm/grammars/tree-sitter-python.wasm' with { type: 'file' };
+// @ts-ignore
+import GRAMMAR_RUBY from '../../assets/wasm/grammars/tree-sitter-ruby.wasm' with { type: 'file' };
+// @ts-ignore
+import GRAMMAR_GO from '../../assets/wasm/grammars/tree-sitter-go.wasm' with { type: 'file' };
+
+// Bumped whenever chunker output shape changes (new tokenizer, merge-threshold,
+// language set, etc.) so importCodeFile's content_hash re-chunks existing pages
+// after a gbrain upgrade. See A2 / C2 in the v0.19.0 plan.
+export const CHUNKER_VERSION = 2;
 
 // Lazy-loaded tree-sitter module (v0.22.x API: Parser is default export)
 let Parser: typeof import('web-tree-sitter') | null = null;
@@ -47,13 +79,15 @@ export interface CodeChunkOptions {
   fallbackOverlapWords?: number;
 }
 
-const GRAMMAR_FILES: Record<SupportedCodeLanguage, string> = {
-  typescript: 'tree-sitter-typescript.wasm',
-  tsx: 'tree-sitter-tsx.wasm',
-  javascript: 'tree-sitter-javascript.wasm',
-  python: 'tree-sitter-python.wasm',
-  ruby: 'tree-sitter-ruby.wasm',
-  go: 'tree-sitter-go.wasm',
+// Map each supported language to its embedded-asset path (resolved by Bun).
+// At runtime, these are file paths the tree-sitter runtime can read.
+const GRAMMAR_PATHS: Record<SupportedCodeLanguage, string> = {
+  typescript: GRAMMAR_TYPESCRIPT,
+  tsx: GRAMMAR_TSX,
+  javascript: GRAMMAR_JAVASCRIPT,
+  python: GRAMMAR_PYTHON,
+  ruby: GRAMMAR_RUBY,
+  go: GRAMMAR_GO,
 };
 
 const TOP_LEVEL_TYPES: Record<SupportedCodeLanguage, Set<string>> = {
@@ -371,16 +405,11 @@ async function ensureInit(): Promise<void> {
   if (!initPromise) {
     initPromise = (async () => {
       const P = await getParser();
-      // v0.22.x: init takes locateFile for the WASM module
-      const wasmPath = new URL('../../../node_modules/web-tree-sitter/tree-sitter.wasm', import.meta.url);
-      let resolved: string;
-      try {
-        const { fileURLToPath } = await import('url');
-        resolved = fileURLToPath(wasmPath);
-      } catch {
-        resolved = wasmPath.pathname;
-      }
-      await (P as any).init({ locateFile: () => resolved });
+      // v0.22.x: init takes locateFile for the WASM module.
+      // TREE_SITTER_WASM is a path resolved by Bun's embedded-file loader — it
+      // points at the real file in dev, and the bundler-synthesized path in
+      // the compiled binary. Either way tree-sitter can read it.
+      await (P as any).init({ locateFile: () => TREE_SITTER_WASM });
       initDone = true;
     })();
   }
@@ -389,20 +418,12 @@ async function ensureInit(): Promise<void> {
 
 async function loadLanguage(language: SupportedCodeLanguage): Promise<any> {
   if (languageCache.has(language)) return languageCache.get(language);
-
   const P = await getParser();
-  const grammarUrl = new URL(
-    `../../../node_modules/tree-sitter-wasms/out/${GRAMMAR_FILES[language]}`,
-    import.meta.url,
-  );
-  let resolved: string;
-  try {
-    const { fileURLToPath } = await import('url');
-    resolved = fileURLToPath(grammarUrl);
-  } catch {
-    resolved = grammarUrl.pathname;
+  const grammarPath = GRAMMAR_PATHS[language];
+  if (!grammarPath) {
+    throw new Error(`No embedded grammar for language: ${language}`);
   }
-  const lang = await (P as any).Language.load(resolved);
+  const lang = await (P as any).Language.load(grammarPath);
   languageCache.set(language, lang);
   return lang;
 }
