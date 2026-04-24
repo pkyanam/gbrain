@@ -412,7 +412,10 @@ export class PostgresEngine implements BrainEngine {
     // v0.19.0: includes language/symbol_name/symbol_type/start_line/end_line
     // so code chunks carry tree-sitter metadata into the DB. Markdown chunks
     // pass NULL for all five.
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line)';
+    // v0.20.0 Cathedral II Layer 6: adds parent_symbol_path / doc_comment /
+    // symbol_name_qualified so nested-chunk emission (A3) can round-trip
+    // scope metadata through upserts.
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified)';
     const rows: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -421,22 +424,27 @@ export class PostgresEngine implements BrainEngine {
       const embeddingStr = chunk.embedding
         ? '[' + Array.from(chunk.embedding).join(',') + ']'
         : null;
+      const parentPath = chunk.parent_symbol_path && chunk.parent_symbol_path.length > 0
+        ? chunk.parent_symbol_path
+        : null;
 
       if (embeddingStr) {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
         params.push(
           pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
           embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null,
           chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
           chunk.start_line ?? null, chunk.end_line ?? null,
+          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
         );
       } else {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
         params.push(
           pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
           chunk.model || 'text-embedding-3-large', chunk.token_count || null,
           chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
           chunk.start_line ?? null, chunk.end_line ?? null,
+          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
         );
       }
     }
@@ -455,7 +463,10 @@ export class PostgresEngine implements BrainEngine {
          symbol_name = EXCLUDED.symbol_name,
          symbol_type = EXCLUDED.symbol_type,
          start_line = EXCLUDED.start_line,
-         end_line = EXCLUDED.end_line`,
+         end_line = EXCLUDED.end_line,
+         parent_symbol_path = EXCLUDED.parent_symbol_path,
+         doc_comment = EXCLUDED.doc_comment,
+         symbol_name_qualified = EXCLUDED.symbol_name_qualified`,
       params as Parameters<typeof sql.unsafe>[1],
     );
   }

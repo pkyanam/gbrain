@@ -411,6 +411,10 @@ export async function importCodeFile(
   // metadata (symbol_name, symbol_type, language, start_line, end_line)
   // which we persist as columns so the v0.19.0 query --lang + code-def +
   // code-refs surfaces can filter without parsing chunk_text.
+  // v0.20.0 Cathedral II Layer 6 (A3): parent_symbol_path flows through
+  // from the chunker (nested methods carry ['ClassName'] etc.) so the
+  // chunk-grain FTS trigger picks up scope for ranking and downstream
+  // Layer 5 edge resolution can use scope-qualified identity.
   const codeChunks = await chunkCodeText(content, relativePath);
   const chunks: ChunkInput[] = codeChunks.map((c, i) => ({
     chunk_index: i,
@@ -421,6 +425,10 @@ export async function importCodeFile(
     symbol_type: c.metadata.symbolType,
     start_line: c.metadata.startLine,
     end_line: c.metadata.endLine,
+    parent_symbol_path:
+      c.metadata.parentSymbolPath && c.metadata.parentSymbolPath.length > 0
+        ? c.metadata.parentSymbolPath
+        : undefined,
   }));
 
   // v0.19.0 E2 — incremental chunking. Embedding calls dominate the cost

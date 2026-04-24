@@ -130,6 +130,14 @@ export interface CodeChunkMetadata {
   language: SupportedCodeLanguage;
   startLine: number;
   endLine: number;
+  /**
+   * v0.20.0 Cathedral II Layer 6 (A3): chain of enclosing symbols from
+   * outermost to innermost. Empty for top-level nodes. `['BrainEngine',
+   * 'searchKeyword']` for a nested method 2 levels deep. Pairs with the
+   * chunk header which prints `(in BrainEngine.searchKeyword)` so the
+   * embedding captures scope context.
+   */
+  parentSymbolPath?: string[];
 }
 
 export interface CodeChunk {
@@ -313,6 +321,54 @@ const BODY_NODE_TYPES = new Set([
   'body',
 ]);
 
+/**
+ * v0.20.0 Cathedral II Layer 6 (A3) — nested-chunk emission config.
+ *
+ * Per-language map: when a top-level AST node is `parentType`, emit each
+ * child of type `childTypes` as its OWN chunk with `parentSymbolPath`
+ * populated. The parent itself still emits a chunk for the class-level
+ * documentation / scope overview. This lets retrieval surface individual
+ * methods (with scope context "in ClassName.method") instead of returning
+ * the entire class body for a symbol-specific query.
+ *
+ * Languages not in this map keep current behavior: top-level node → one
+ * chunk. Go stays absent (methods are already top-level with receivers).
+ */
+interface NestedEmitConfig {
+  parentTypes: Set<string>;
+  childTypes: Set<string>;
+}
+const NESTED_EMIT_CONFIG: Partial<Record<SupportedCodeLanguage, NestedEmitConfig>> = {
+  typescript: {
+    parentTypes: new Set(['class_declaration', 'abstract_class_declaration', 'interface_declaration']),
+    childTypes: new Set(['method_definition', 'method_signature', 'public_field_definition']),
+  },
+  tsx: {
+    parentTypes: new Set(['class_declaration', 'interface_declaration']),
+    childTypes: new Set(['method_definition', 'method_signature', 'public_field_definition']),
+  },
+  javascript: {
+    parentTypes: new Set(['class_declaration']),
+    childTypes: new Set(['method_definition', 'field_definition']),
+  },
+  python: {
+    parentTypes: new Set(['class_definition']),
+    childTypes: new Set(['function_definition']),
+  },
+  ruby: {
+    parentTypes: new Set(['class', 'module']),
+    childTypes: new Set(['method', 'singleton_method']),
+  },
+  rust: {
+    parentTypes: new Set(['impl_item', 'trait_item']),
+    childTypes: new Set(['function_item']),
+  },
+  java: {
+    parentTypes: new Set(['class_declaration', 'interface_declaration', 'record_declaration']),
+    childTypes: new Set(['method_declaration', 'constructor_declaration']),
+  },
+};
+
 let initDone = false;
 let initPromise: Promise<void> | null = null;
 const languageCache = new Map<SupportedCodeLanguage, any>();
@@ -427,11 +483,37 @@ export async function chunkCodeText(
     }
 
     const chunks: CodeChunk[] = [];
+    const nestedConfig = NESTED_EMIT_CONFIG[language];
+
     for (const node of semanticNodes) {
-      const symbolName = extractSymbolName(node);
-      const symbolType = normalizeSymbolType(node.type);
       const nodeText = source.slice(node.startIndex, node.endIndex).trim();
       if (!nodeText) continue;
+
+      // v0.20.0 Cathedral II Layer 6 (A3): for class/module/impl nodes,
+      // emit the parent AND each child method as its own chunk with
+      // parentSymbolPath populated. Retrieval then surfaces individual
+      // methods when a query targets one, instead of returning the whole
+      // class body. The parent chunk still ships so class-level docs /
+      // scope overview stay queryable.
+      //
+      // For Ruby (`module Admin { class UsersController { ... } }`) and
+      // Java (nested classes) the expansion is recursive: a nested class
+      // inside a module itself emits its methods with the full parent
+      // path [Admin, UsersController].
+      //
+      // TS/JS `export class Foo {...}` wraps the class in an
+      // `export_statement`. Unwrap one level to find the nestable
+      // declaration; top-level chunk still uses the outer node's range
+      // so the header shows the `export` keyword for completeness.
+      const nestableNode = findNestableParent(node, nestedConfig);
+      const symbolName = extractSymbolName(nestableNode ?? node);
+      const symbolType = normalizeSymbolType((nestableNode ?? node).type);
+
+      if (nestableNode && symbolName && nestedConfig) {
+        const before = chunks.length;
+        emitNestedScoped(nestableNode, [], source, filePath, language, nestedConfig, chunks);
+        if (chunks.length > before) continue;
+      }
 
       if (estimateTokens(nodeText) <= largeThreshold) {
         chunks.push(buildChunk({
@@ -439,6 +521,7 @@ export async function chunkCodeText(
           startLine: node.startPosition.row + 1,
           endLine: node.endPosition.row + 1,
           index: chunks.length,
+          parentSymbolPath: [],
         }));
         continue;
       }
@@ -451,6 +534,7 @@ export async function chunkCodeText(
           startLine: node.startPosition.row + 1,
           endLine: node.endPosition.row + 1,
           index: chunks.length,
+          parentSymbolPath: [],
         }));
         continue;
       }
@@ -462,6 +546,7 @@ export async function chunkCodeText(
           body, filePath, language, symbolName, symbolType,
           startLine: range.startLine, endLine: range.endLine,
           index: chunks.length,
+          parentSymbolPath: [],
         }));
       }
     }
@@ -502,12 +587,25 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
   // substantive classes/functions. A 3-method class body is typically
   // 80-200 tokens, well above 15% of 300 = 45 tokens → stays independent.
   const mergeThreshold = Math.floor(chunkTarget * 0.15);
+  // v0.20.0 Cathedral II Layer 6 (A3): never merge chunks that carry
+  // parent-scope metadata. They were emitted for a reason — retrieval
+  // wants to surface them individually, not roll them up into a single
+  // anonymous "merged" chunk. Skip applies both to the parent scope
+  // header (empty parent path, but holds the class declaration) and to
+  // nested leaves (non-empty parent path).
+  const hasScopedChunks = chunks.some(c => (c.metadata.parentSymbolPath ?? []).length > 0);
   const merged: CodeChunk[] = [];
   let i = 0;
   while (i < chunks.length) {
     const current = chunks[i]!;
     const currentTokens = estimateTokens(current.text);
-    if (currentTokens >= mergeThreshold) {
+    const currentIsScoped = (current.metadata.parentSymbolPath ?? []).length > 0;
+    // If ANY chunk in this file participates in parent-scope emission, the
+    // scope chunks + their siblings all pass through verbatim. A Python
+    // class body's 3 × 10-token methods are each their own chunk on
+    // purpose — merging would erase the (in ClassName) scope header
+    // Layer 6 just added.
+    if (currentTokens >= mergeThreshold || hasScopedChunks || currentIsScoped) {
       merged.push({ ...current, index: merged.length });
       i++;
       continue;
@@ -552,6 +650,7 @@ function buildMergedChunk(group: CodeChunk[], index: number): CodeChunk {
       language: first.metadata.language,
       startLine: first.metadata.startLine,
       endLine: last.metadata.endLine,
+      parentSymbolPath: [],
     },
   };
 }
@@ -585,9 +684,14 @@ function buildChunk(input: {
   startLine: number;
   endLine: number;
   index: number;
+  /** v0.20.0 Cathedral II Layer 6: non-empty when nested inside a parent. */
+  parentSymbolPath?: string[];
 }): CodeChunk {
   const symbol = input.symbolName ? `${input.symbolType} ${input.symbolName}` : input.symbolType;
-  const header = `[${displayLang(input.language)}] ${input.filePath}:${input.startLine}-${input.endLine} ${symbol}`;
+  const parentPath = input.parentSymbolPath && input.parentSymbolPath.length > 0
+    ? ` (in ${input.parentSymbolPath.join('.')})`
+    : '';
+  const header = `[${displayLang(input.language)}] ${input.filePath}:${input.startLine}-${input.endLine} ${symbol}${parentPath}`;
   return {
     index: input.index,
     text: `${header}\n\n${input.body}`,
@@ -598,8 +702,129 @@ function buildChunk(input: {
       language: input.language,
       startLine: input.startLine,
       endLine: input.endLine,
+      parentSymbolPath: input.parentSymbolPath ?? [],
     },
   };
+}
+
+/**
+ * v0.20.0 Cathedral II Layer 6 (A3) helper: find the nestable-parent
+ * node to expand. Returns `node` itself when it matches config.parentTypes,
+ * or its first descendant that does — unwraps TS/JS `export_statement`,
+ * `export_default_declaration`, etc. Returns null when nothing nestable
+ * found.
+ */
+function findNestableParent(node: any, config: NestedEmitConfig | undefined): any | null {
+  if (!config) return null;
+  if (config.parentTypes.has(node.type)) return node;
+  // One-level unwrap — TS export_statement wraps a class_declaration.
+  // We don't go deeper because that would accidentally treat a method
+  // inside a class as a top-level parent.
+  for (const child of node.namedChildren) {
+    if (config.parentTypes.has(child.type)) return child;
+  }
+  return null;
+}
+
+/**
+ * v0.20.0 Cathedral II Layer 6 (A3) helper: collect immediate nested
+ * children matching the language's nested-emit config. Descends only
+ * through body-style wrappers (class_body, module_body, etc.) which are
+ * grammar-level container nodes, not symbols themselves.
+ */
+function collectImmediateNestedChildren(node: any, config: NestedEmitConfig): {
+  parents: any[]; // children that are themselves parentTypes (recurse)
+  leaves: any[];  // children that are childTypes (methods)
+} {
+  const parents: any[] = [];
+  const leaves: any[] = [];
+  const scan = (n: any) => {
+    for (const child of n.namedChildren) {
+      if (config.parentTypes.has(child.type)) parents.push(child);
+      else if (config.childTypes.has(child.type)) leaves.push(child);
+      if (BODY_NODE_TYPES.has(child.type) || child.type.endsWith('_body')) {
+        scan(child);
+      }
+    }
+  };
+  scan(node);
+  return { parents, leaves };
+}
+
+/**
+ * v0.20.0 Cathedral II Layer 6 (A3): recursively emit a nested parent
+ * node and its children. Walks the parent chain, pushing chunks onto
+ * `chunks` as it goes. Call with parentPath=[] at the top level.
+ *
+ * Each parent gets a slim "scope header" chunk (declaration line +
+ * member list). Each leaf (method) gets its own chunk with the full
+ * parentPath populated. Nested parents recurse with the parent chain
+ * extended by the enclosing parent's name.
+ */
+function emitNestedScoped(
+  node: any,
+  parentPath: string[],
+  source: string,
+  filePath: string,
+  language: SupportedCodeLanguage,
+  config: NestedEmitConfig,
+  chunks: CodeChunk[],
+): void {
+  const name = extractSymbolName(node);
+  if (!name) return;
+  const symbolType = normalizeSymbolType(node.type);
+  const { parents, leaves } = collectImmediateNestedChildren(node, config);
+
+  // Parent scope-header chunk: declaration + member digest.
+  const digestNames = [
+    ...parents.map(p => extractSymbolName(p)).filter((n): n is string => Boolean(n)),
+    ...leaves.map(l => extractSymbolName(l)).filter((n): n is string => Boolean(n)),
+  ];
+  chunks.push(buildChunk({
+    body: buildScopeHeaderBody(node, source, digestNames),
+    filePath, language, symbolName: name, symbolType,
+    startLine: node.startPosition.row + 1,
+    endLine: node.endPosition.row + 1,
+    index: chunks.length,
+    parentSymbolPath: [...parentPath],
+  }));
+
+  const newParentPath = [...parentPath, name];
+
+  // Recursively expand nested parents (e.g. module Admin → class Users).
+  for (const p of parents) {
+    emitNestedScoped(p, newParentPath, source, filePath, language, config, chunks);
+  }
+
+  // Leaf children: methods / functions / fields.
+  for (const leaf of leaves) {
+    const leafName = extractSymbolName(leaf);
+    const leafType = normalizeSymbolType(leaf.type);
+    const leafText = source.slice(leaf.startIndex, leaf.endIndex).trim();
+    if (!leafText) continue;
+    chunks.push(buildChunk({
+      body: leafText, filePath, language,
+      symbolName: leafName, symbolType: leafType,
+      startLine: leaf.startPosition.row + 1,
+      endLine: leaf.endPosition.row + 1,
+      index: chunks.length,
+      parentSymbolPath: newParentPath,
+    }));
+  }
+}
+
+/**
+ * Build a slim scope-header body for a parent chunk. The full method
+ * bodies land in their own nested chunks, so the parent just needs the
+ * declaration line + a digest of member names so class-level queries
+ * still hit something.
+ */
+function buildScopeHeaderBody(node: any, source: string, memberNames: string[]): string {
+  const full = source.slice(node.startIndex, node.endIndex);
+  const firstLineBreak = full.indexOf('\n');
+  const declaration = firstLineBreak > 0 ? full.slice(0, firstLineBreak) : full.slice(0, 120);
+  if (memberNames.length === 0) return declaration;
+  return `${declaration}\n\n// Members: ${memberNames.slice(0, 20).join(', ')}`;
 }
 
 interface SplitRange {
