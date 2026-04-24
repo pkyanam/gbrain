@@ -204,6 +204,18 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   process.on('SIGINT',  () => { void shutdown('SIGINT'); });
 
   let consecutiveErrors = 0;
+  // Peer-worker liveness for --no-worker mode. The probe is a proxy, not
+  // ground truth: SELECT count(*) of active jobs with a recent lock_until
+  // refresh. A queue with only waiting jobs and a healthy idle worker
+  // reads as "no worker" (false positive); a worker that died 110s ago
+  // while holding a lock reads as "alive" until lock_until expires.
+  // Good enough for V1 — a ground-truth minion_workers heartbeat table
+  // is tracked as v0.19.1 follow-up B7. When the probe sees no signal
+  // for NO_WORKER_WARN_TICKS consecutive cycles, log a loud warning so
+  // the operator can spot "I set --no-worker but forgot to start one"
+  // before the queue piles up.
+  const NO_WORKER_WARN_TICKS = 3;
+  let noWorkerConsecutiveIdle = 0;
 
   while (!stopping) {
     const cycleStart = Date.now();
@@ -221,6 +233,43 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         await engine.disconnect();
         await (engine as any).connect?.();
       } catch (e) { logError('reconnect', e); }
+    }
+
+    // --no-worker peer-liveness probe (v0.19.1). Runs every cycle, cheap
+    // (single SELECT). See NO_WORKER_WARN_TICKS comment above for caveats.
+    if (noWorker && useMinionsDispatch) {
+      try {
+        const rows = await (engine as any).executeRaw?.(
+          `SELECT count(*)::int AS n FROM minion_jobs
+             WHERE status = 'active'
+               AND lock_until IS NOT NULL
+               AND lock_until > now() - interval '2 minutes'`,
+        );
+        const liveWorkerSignal = Number((rows as Array<{ n: number }>)?.[0]?.n ?? 0);
+        if (liveWorkerSignal === 0) {
+          noWorkerConsecutiveIdle++;
+          if (noWorkerConsecutiveIdle === NO_WORKER_WARN_TICKS) {
+            // Fire loud on the Nth consecutive idle tick; don't repeat on every
+            // subsequent cycle (the operator already saw it), re-arm once a
+            // live worker is seen again.
+            console.error(
+              `[autopilot] WARNING: --no-worker set and no worker has claimed a job in ~${NO_WORKER_WARN_TICKS * baseInterval}s. ` +
+              `Jobs will pile up in 'waiting' until a worker starts. ` +
+              `Probe is a proxy (lock_until refresh) and can false-positive on idle queues — see B7 for ground-truth follow-up.`,
+            );
+          }
+        } else {
+          if (noWorkerConsecutiveIdle >= NO_WORKER_WARN_TICKS) {
+            console.log('[autopilot] --no-worker probe: live worker signal detected; warning re-armed.');
+          }
+          noWorkerConsecutiveIdle = 0;
+        }
+      } catch (e) {
+        // Probe failures never block the main dispatch loop. Log once per
+        // failure class; ignore repeated errors (common shape: DB reconnect
+        // blip between ticks).
+        logError('no-worker-probe', e);
+      }
     }
 
     if (useMinionsDispatch) {
