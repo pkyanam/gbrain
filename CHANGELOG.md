@@ -2,9 +2,9 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [1.0.0.0] - 2026-04-22
+## [0.22.0] - 2026-04-25
 
-## **Multi-agent is real. OAuth 2.1, HTTP server, React admin dashboard. Ship once, every AI client connects.**
+## **Multi-agent MCP is real. OAuth 2.1, HTTP server, React admin dashboard. Ship once, every AI client connects.**
 ## **`gbrain serve --http` starts a production-grade OAuth server with embedded admin UI. Zero external dependencies.**
 
 This is GBrain as an organizational knowledge layer. Multiple AI agents, authenticated with scoped tokens, hitting the same brain over the wire. Perplexity Computer writes research. Claude queries for context. ChatGPT calls tools. Every request authenticated, every scope enforced, every action logged. One binary, zero infrastructure.
@@ -17,7 +17,7 @@ React admin dashboard baked into the binary. Seven screens designed through Stev
 
 7 bisectable commits on this branch before the merge. 27 dedicated OAuth tests, all pass. Full suite: 2068 pass / 18 pre-existing master timeouts (unchanged from the merge). Typecheck clean.
 
-| Metric | BEFORE v1.0 | AFTER v1.0 | Δ |
+| Metric | BEFORE v0.22 | AFTER v0.22 | Δ |
 |---|---|---|---|
 | Auth mechanism | static bearer tokens | OAuth 2.1 + legacy fallback | protocol-compliant |
 | Concurrent agents | 1 (stdio only) | many (HTTP) | unbounded |
@@ -30,7 +30,7 @@ React admin dashboard baked into the binary. Seven screens designed through Stev
 
 `gbrain auth register-client perplexity --grant-types client_credentials --scopes "read write"` gives you credentials. `gbrain serve --http --port 3131` starts the server, prints the admin bootstrap token. Open `localhost:3131/admin`, paste the token, watch the live feed. Every Perplexity search, every Claude query, every ChatGPT tool call streams into the dashboard in real time. You see who's connected, what they're doing, and where the errors are. The thing actually works, this isn't a stepping stone, it's the production surface.
 
-## To take advantage of v1.0.0.0
+## To take advantage of v0.22.0
 
 `gbrain upgrade` should run the schema migration automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
@@ -61,7 +61,7 @@ React admin dashboard baked into the binary. Seven screens designed through Stev
 **OAuth 2.1 (new):**
 - `src/core/oauth-provider.ts` (404 lines) ... `GBrainOAuthProvider` implementing MCP SDK's `OAuthServerProvider` + `OAuthRegisteredClientsStore` interfaces. Backed by raw SQL (works on both PGLite and Postgres).
 - All tokens + client secrets SHA-256 hashed before storage. Auth codes single-use with 10-minute TTL. Refresh tokens rotate on use. Client credentials grant issues access token only (no refresh per RFC 6749 §4.4.3).
-- Legacy `access_tokens` fallback: pre-v1.0 bearer tokens continue working, grandfathered as `read+write+admin` scopes.
+- Legacy `access_tokens` fallback: pre-v0.22 bearer tokens continue working, grandfathered as `read+write+admin` scopes.
 - `sweepExpiredTokens()` runs on startup wrapped in try/catch ... server boots even if the sweep fails.
 - `hashToken()` and `generateToken()` extracted to `src/core/utils.ts` (DRY across auth surfaces).
 
