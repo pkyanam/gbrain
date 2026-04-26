@@ -356,6 +356,10 @@ gbrain skillpack diff brain-ops                # compare bundle vs your local co
 
 Re-running is safe. The managed-block markers in your AGENTS.md let `skillpack install`
 accumulate rows across separate single-skill installs instead of overwriting each other.
+A receipt comment inside the fence (`<!-- gbrain:skillpack:manifest cumulative-slugs="..." -->`)
+tracks what gbrain has installed across runs. `install --all` is the only path that prunes;
+per-skill install never deletes what it didn't install. If you hand-add a row inside the fence,
+gbrain preserves it on reinstall and emits a stderr notice telling your agent to investigate.
 
 **Skillify is the piece that makes the skills tree survive six months of compounding work.**
 Read [`skills/skillify/SKILL.md`](skills/skillify/SKILL.md) for the full 10-item checklist
