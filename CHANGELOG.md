@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.21.1] - 2026-04-26
+## [0.22.1] - 2026-04-26
 
 **Autopilot stops being a noisy neighbor.**
 
@@ -38,7 +38,7 @@ The original #406 wrapped `executeRaw` in a per-call retry that auto-recovered f
 - 4 cases for `#417` + Codex F2: cycle threads `pagesAffected` into extract, full-walk fallback, F2 noExtract gating (full cycle vs sync-only).
 - 3 cases for D3: `executeRaw` has no per-call retry wrapper, `reconnect()` still exists, supervisor still has 3-strikes path.
 
-### To take advantage of v0.21.1
+### To take advantage of v0.22.1
 
 No manual step. PGLite users get the universal fixes automatically on next cycle. Postgres users additionally get session timeouts on the next pool reconnect, server-side stale filtering on the next `embed --stale`, and supervisor reconnect on the next pool poisoning event.
 
