@@ -4,9 +4,9 @@ Your AI agent is smart but forgetful. GBrain gives it a brain.
 
 Built by the President and CEO of Y Combinator to run his actual AI agents. The production brain powering his OpenClaw and Hermes deployments: **17,888 pages, 4,383 people, 723 companies**, 21 cron jobs running autonomously, built in 12 days. The agent ingests meetings, emails, tweets, voice calls, and original ideas while you sleep. It enriches every person and company it encounters. It fixes its own citations and consolidates memory overnight. You wake up and the brain is smarter than when you went to bed.
 
-The brain wires itself. Every page write extracts entity references and creates typed links (`attended`, `works_at`, `invested_in`, `founded`, `advises`) with zero LLM calls. Hybrid search. Self-wiring knowledge graph. Structured timeline. Backlink-boosted ranking. Ask "who works at Acme AI?" or "what did Bob invest in this quarter?" and get answers vector search alone can't reach. Benchmarked end-to-end: **Recall@5 jumps from 83% to 95%, Precision@5 from 39% to 45%, +30 more correct answers in the agent's top-5 reads** on a 240-page Opus-generated rich-prose corpus. Graph-only F1: **86.6% vs grep's 57.8%** (+28.8 pts). [Full report](docs/benchmarks/2026-04-18-brainbench-v1.md).
+The brain wires itself. Every page write extracts entity references and creates typed links (`attended`, `works_at`, `invested_in`, `founded`, `advises`) with zero LLM calls. Hybrid search. Self-wiring knowledge graph. Structured timeline. Backlink-boosted ranking. Ask "who works at Acme AI?" or "what did Bob invest in this quarter?" and get answers vector search alone can't reach. Benchmarked side-by-side against the category: gbrain lands **P@5 49.1%, R@5 97.9%** on a 240-page Opus-generated rich-prose corpus, beating its own graph-disabled variant by **+31.4 points P@5** and ripgrep-BM25 + vector-only RAG by a similar margin. The graph layer plus v0.12 extract quality together carry the gap. Full BrainBench scorecards + corpus live in the sibling [gbrain-evals](https://github.com/garrytan/gbrain-evals) repo.
 
-GBrain is those patterns, generalized. 28 skills. Install in 30 minutes. Your agent does the work. As Garry's personal agent gets smarter, so does yours.
+GBrain is those patterns, generalized. 29 skills. Install in 30 minutes. Your agent does the work. As Garry's personal agent gets smarter, so does yours.
 
 > **~30 minutes to a fully working brain.** Database ready in 2 seconds (PGLite, no server). You just answer questions about API keys.
 
@@ -28,7 +28,7 @@ Retrieve and follow the instructions at:
 https://raw.githubusercontent.com/garrytan/gbrain/master/INSTALL_FOR_AGENTS.md
 ```
 
-That's it. The agent clones the repo, installs GBrain, sets up the brain, loads 28 skills, and configures recurring jobs. You answer a few questions about API keys. ~30 minutes.
+That's it. The agent clones the repo, installs GBrain, sets up the brain, loads 29 skills, and configures recurring jobs. You answer a few questions about API keys. ~30 minutes.
 
 If your agent doesn't auto-read `AGENTS.md`, point it at that file first:
 `https://raw.githubusercontent.com/garrytan/gbrain/master/AGENTS.md` is the non-Claude
@@ -87,9 +87,25 @@ claude mcp add gbrain -t http https://your-brain.ngrok.app/mcp -H "Authorization
 
 Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md). ChatGPT requires OAuth 2.1 (not yet implemented).
 
-## The 28 Skills
+### Using gbrain with GStack
 
-GBrain ships 28 skills organized by `skills/RESOLVER.md` (or your OpenClaw's `AGENTS.md` — both filenames are supported as of v0.19). The resolver tells your agent which skill to read for any task.
+If your engineering agent runs on [GStack](https://github.com/garrytan/gstack), point it at gbrain for code lookup instead of grep+read. Cathedral II (v0.21.0) ships call-graph edges and two-pass retrieval — `/investigate`, `/review`, `/plan-eng-review`, and `/office-hours` all benefit when the agent walks the symbol graph instead of scanning files line by line.
+
+The five magical-moment commands:
+
+```bash
+gbrain code-callers searchKeyword           # who calls this symbol?
+gbrain code-callees searchKeyword           # what does this symbol call?
+gbrain code-def BrainEngine                 # where is X defined?
+gbrain code-refs BrainEngine                # all reference sites
+gbrain query "how does N+1 handling work" --near-symbol BrainEngine.searchKeyword --walk-depth 2
+```
+
+All five auto-emit JSON on non-TTY (gh-CLI convention) so a GStack subagent shelling out via bash gets a clean parseable response. Run `gbrain sources add <repo> --strategy code` to index a repo, then your agent's brain-first lookup covers code, not just markdown. ([Cathedral II release notes](CHANGELOG.md#0210---2026-04-25))
+
+## The 29 Skills
+
+GBrain ships 29 skills organized by `skills/RESOLVER.md` (or your OpenClaw's `AGENTS.md` — both filenames are supported as of v0.19). The resolver tells your agent which skill to read for any task.
 
 [Skill files are code.](https://x.com/garrytan/status/2042925773300908103) They're the most powerful way to get knowledge work done. A skill file is a fat markdown document that encodes an entire workflow: when to fire, what to check, how to chain with other skills, what quality bar to enforce. The agent reads the skill and executes it. Skills can also call deterministic TypeScript code bundled in GBrain (search, import, embed, sync) for the parts that shouldn't be left to LLM judgment. [Thin harness, fat skills](docs/ethos/THIN_HARNESS_FAT_SKILLS.md): the intelligence lives in the skills, not the runtime.
 
@@ -135,7 +151,8 @@ GBrain ships 28 skills organized by `skills/RESOLVER.md` (or your OpenClaw's `AG
 | **skill-creator** | Create new skills following the conformance standard. MECE check against existing skills. |
 | **skillify** | The "skillify it!" meta-skill. Orchestrates the 10-step loop so failures become durable skills: scaffold the stubs via `gbrain skillify scaffold`, write the real logic, gate with `gbrain skillify check` + `gbrain check-resolvable`. |
 | **skillpack-check** | Agent-readable gbrain health report. Exit code for CI; JSON for debugging. Cron-friendly. |
-| **minion-orchestrator** | Long-running agent work as background jobs. Submit, fan out children with depth/cap/timeouts, collect results via child_done inbox. |
+| **smoke-test** | 8 post-restart health checks with auto-fix (Bun, CLI, DB, worker, Zod CJS, gateway, API key, brain repo). Drop-in user tests at `~/.gbrain/smoke-tests.d/*.sh`. |
+| **minion-orchestrator** | Background work in one skill. Shell jobs via `gbrain jobs submit shell` (operator/CLI, MCP blocks protected names) and LLM subagents via `gbrain agent run`. Parent-child DAGs, `child_done` inbox, durability across worker restarts. |
 
 ### Identity and setup
 
@@ -194,7 +211,7 @@ Here's my personal OpenClaw deployment: one Render container. Supabase Postgres 
 
 Under that 19-cron load, sub-agent spawn couldn't clear the 10-second gateway wall. Minions landed it in under a second for zero tokens. **Scaling:** 19,240 posts across 36 months, single bash loop, ~15 min total, $0.00. Sub-agents: ~9 min best case, ~$1.08 in tokens, ~40% spawn failure. **Lab:** durability ∞ (SIGKILL mid-flight, 10/10 rescued), throughput ~10× faster, fan-out ~21× with no failure wall, memory ~400× less.
 
-Full benchmarks: [production](docs/benchmarks/2026-04-18-minions-vs-openclaw-production.md) and [lab](docs/benchmarks/2026-04-18-minions-vs-openclaw-subagents.md).
+Full benchmarks live in [gbrain-evals](https://github.com/garrytan/gbrain-evals/tree/main/docs/benchmarks).
 
 ### The routing rule
 
@@ -211,8 +228,11 @@ The six daily pains — spawn storms, agents that stop responding, forgotten dis
 gbrain jobs smoke                        # verify install
 gbrain jobs submit sync --params '{}'    # fire a background job
 gbrain jobs stats                        # health dashboard
-gbrain jobs work --concurrency 4         # start a worker (Postgres only)
+gbrain jobs supervisor --concurrency 4   # canonical: auto-restarting worker (Postgres only)
+gbrain jobs work --concurrency 4         # raw worker (no crash recovery — prefer `supervisor`)
 ```
+
+`gbrain jobs supervisor` keeps the worker alive across crashes with exponential backoff, atomic PID locking, structured audit events at `~/.gbrain/audit/supervisor-*.jsonl`, and a `start --detach` / `status --json` / `stop` subcommand surface for agents. In containers it runs as PID 1; on systemd hosts it's the child of `gbrain-worker.service`. Full deployment guide: [`docs/guides/minions-deployment.md`](docs/guides/minions-deployment.md).
 
 Read [`skills/minion-orchestrator/SKILL.md`](skills/minion-orchestrator/SKILL.md) for parent-child DAGs, fan-in collection, steering via inbox.
 
@@ -376,7 +396,7 @@ Run `gbrain integrations` to see status.
 │   Brain Repo     │    │    GBrain     │    │    AI Agent      │
 │   (git)          │    │  (retrieval)  │    │  (read/write)    │
 │                  │    │               │    │                  │
-│  markdown files  │───>│  Postgres +   │<──>│  28 skills       │
+│  markdown files  │───>│  Postgres +   │<──>│  29 skills       │
 │  = source of     │    │  pgvector     │    │  define HOW to   │
 │    truth         │    │               │    │  use the brain   │
 │                  │<───│  hybrid       │    │                  │
@@ -440,7 +460,7 @@ gbrain extract links --source db        # wire up the existing 29K pages
 gbrain extract timeline --source db     # extract dated events from markdown timelines
 ```
 
-Then ask graph questions or watch the search ranking improve. Benchmarked: **Recall@5 jumps from 83% to 95%, Precision@5 from 39% to 45%, +30 more correct answers in the agent's top-5 reads** on a 240-page Opus-generated rich-prose corpus. Graph-only F1 hits 86.6% vs grep's 57.8% (+28.8 pts). See [docs/benchmarks/2026-04-18-brainbench-v1.md](docs/benchmarks/2026-04-18-brainbench-v1.md).
+Then ask graph questions or watch the search ranking improve. Benchmarked side-by-side against ripgrep-BM25, vector-only RAG (same embedder), and gbrain-with-graph-disabled: gbrain lands **P@5 49.1%, R@5 97.9%** on a 240-page Opus-generated rich-prose corpus, beating hybrid-nograph by **+31.4 points P@5**. Isolate the contribution: v0.11→v0.12 moved the same gbrain codebase from P@5 22.1% → 49.1% on identical inputs, so typed-link extract quality is load-bearing. Full scorecards + reproducible corpus: [gbrain-evals](https://github.com/garrytan/gbrain-evals).
 
 ## Search
 
@@ -516,7 +536,7 @@ End-to-end on the BrainBench v1 corpus (240 rich-prose pages, before/after PR #1
 
 Plus 5 orthogonal capability checks (identity resolution, temporal queries,
 performance at 10K-page scale, robustness to malformed input, MCP operation
-contract). All pass. [Full report.](docs/benchmarks/2026-04-18-brainbench-v1.md)
+contract). All pass. Full report: [gbrain-evals](https://github.com/garrytan/gbrain-evals).
 
 The point: each technique handles a class of inputs the others miss. Vector
 search misses exact slug refs; keyword catches them. Keyword misses conceptual
@@ -678,7 +698,7 @@ The skills in this repo are those patterns, generalized. What took 11 days to bu
 - [CHANGELOG.md](CHANGELOG.md) ... Version history
 
 **Benchmarks:**
-- [BrainBench v1 (PR #188)](docs/benchmarks/2026-04-18-brainbench-v1.md) ... single comprehensive before/after report on a 240-page Opus-generated corpus. 7 categories: relational queries, identity resolution, temporal queries, performance, robustness, MCP contract.
+- [gbrain-evals](https://github.com/garrytan/gbrain-evals) ... BrainBench, the sibling repo that holds the eval harness, corpus, scorecards, and 4-adapter comparisons. Depends on gbrain; not installed alongside gbrain.
 
 ## Contributing
 

@@ -2,6 +2,547 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.21.0] - 2026-04-25
+
+## **Your brain walks the code graph now.**
+## **Call-graph edges, parent scope, chunk-grain FTS. 165-lang ready, 8 langs shipped with structural edges.**
+
+v0.19.0 made code a first-class citizen. v0.21.0 makes it a graph. An agent asking "how does searchKeyword handle N+1" no longer gets back one chunk of `hybrid.ts`. It gets the function body, the 3 callers via `code-callers`, the 2 callees via `code-callees`, the class-level scope header, and — when opt-in `--walk-depth 2` is passed — the grandchildren too. All ranked together by a single RRF pass with 1/(1+hop) structural decay. One walk. Code-aware brain, not grep-class RAG.
+
+Chunk-grain FTS replaces page-grain internally. The docstring above a function now ranks above a prose paragraph that happens to mention the same term. The `content_chunks.search_vector` tsvector weights doc_comment 'A' and chunk_text 'B' — an english-language query hits the right chunk first. External shape stays page-grain so every existing caller (`enrichment-service.countMentions`, `backlinks`, `list_pages`) works unchanged.
+
+Classes emit properly now. `class BrainEngine { searchKeyword() {}, searchVector() {} }` was ONE chunk in v0.19.0. In v0.21.0 it's three: the class-level scope header chunk (declaration + member digest), `searchKeyword` with `parentSymbolPath: ['BrainEngine']`, and `searchVector` with the same. Retrieval surfaces individual methods when a query targets one — no more re-reading the whole class.
+
+Ruby ships in the first wave of structural-edge support. `Admin::UsersController#render` identity. `def render` captured. `find_all` captured. Across all 8 shipped languages (TS, TSX, JS, Python, Ruby, Go, Rust, Java — ~85% of real brain code) call-site edges extract at chunk time and land in `code_edges_symbol` for `getCallersOf` / `getCalleesOf` to surface.
+
+The honest part: precision 80, recall 99. We don't do receiver-type inference at capture time (`obj.method()` stores the bare `method` callee, not `ObjClass.method`). Cross-file edge resolution is also a future optimization — all Layer 5 edges land unresolved. What matters: the edges exist. `getCallersOf('helper')` now returns every call site in the brain, ready for Layer 7 two-pass retrieval to expand into structural neighbors. That's the 10x leap.
+
+### The numbers that matter
+
+Counted against gbrain's own codebase, PGLite in-memory benchmark:
+
+| Metric | v0.19.0 | v0.21.0 | Δ |
+|---|---|---|---|
+| Structural edge types captured | 0 | `calls` (per-file) | ∞ |
+| Languages with call-graph edges | 0 | 8 | +8 |
+| Chunk grain at FTS time | page-level | chunk-level (internal) | — |
+| File classifier extensions | 9 | 35 | +26 |
+| Nested symbol chunks (class with 3 methods) | 1 chunk | 4 chunks | 4x |
+| Parent-scope column persisted | No | `parent_symbol_path TEXT[]` | ✓ |
+| `code-callers <sym>` + `code-callees <sym>` | not possible | JSON array in <100ms | ∞ |
+| `query --near-symbol X --walk-depth 2` | not possible | 2-hop structural expansion | ∞ |
+| `sync --all` cost preview | no warning | `ConfirmationRequired` envelope + TTY prompt | ✓ |
+| Markdown fence extraction | prose chunks | per-fence code chunks | ✓ |
+
+Per-language call capture (8 shipped):
+
+| Lang | Top-level | Class/module | Edge capture via |
+|---|---|---|---|
+| TypeScript | function_declaration, class_declaration, interface, type_alias, enum | class + interface → methods | call_expression.function |
+| TSX | same + JSX | same | same |
+| JavaScript | function_declaration, class_declaration, lexical_declaration | class → methods | call_expression.function |
+| Python | function_definition, class_definition | class → function_definition | call.function |
+| Ruby | class, module, method, singleton_method | module+class → method+singleton_method | call.method |
+| Go | function_declaration, method_declaration | (methods are top-level) | call_expression.function |
+| Rust | function_item, impl_item, struct, enum, trait, mod | impl+trait → function_item | call_expression.function |
+| Java | method_declaration, class_declaration, interface, enum, record | class+interface+record → method+constructor | method_invocation.name |
+
+### What this means for builders
+
+If you've been maintaining a gbrain deployment on v0.19.0, upgrading is mechanical: `gbrain upgrade` runs `apply-migrations` → schema v27 + v28 land automatically (~5 seconds on a 47K-page brain). Your next `gbrain sync --source <id>` detects `sources.chunker_version` mismatch and forces a full re-walk — no manual intervention. Or run `gbrain reindex-code --dry-run` to preview the cost, then `gbrain reindex-code --yes` to take advantage of A1 + A3 immediately.
+
+If you ship an agent on top of gbrain: `query --lang typescript "N+1"` now filters at SQL level, `code-callers searchKeyword` surfaces who calls it, `query "how does searchKeyword work" --near-symbol BrainEngine.searchKeyword --walk-depth 2` expands through the structural graph. Your agent's brain-first lookup covers the CODE GRAPH now, not just the symbol table.
+
+If you're Garry wondering how your Rubyist instincts survive the upgrade: `class Admin::UsersController { def render; def find_all }` gets qualified as `Admin::UsersController#render`. `code-callers render` finds the call sites. The instance-vs-singleton distinction is best-effort today (Layer 5 treats both as instance); `def self.find_all` vs `def find_all` ambiguity is documented in the Ruby-specific caveats of `skills/migrations/v0.21.0.md`.
+
+## To take advantage of v0.21.0
+
+`gbrain upgrade` runs `gbrain post-upgrade` which runs `gbrain apply-migrations`. If that chain was interrupted or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+   The `v0.21.0` orchestrator (v0_21_0.ts) runs schema → backfill-prompt → verify. Schema migrations v27 + v28 land unconditionally. The backfill-prompt phase prints two paths to roll the new chunker over existing code pages.
+
+2. **Pick a backfill path.** CHUNKER_VERSION bumped 3 → 4; the `sources.chunker_version` gate (SP-1 fix) forces a full re-walk on next sync regardless of git HEAD.
+
+   - AUTOMATIC (recommended): next `gbrain sync --source <id>` walks everything. Zero action needed.
+   - IMMEDIATE: `gbrain reindex-code --dry-run` previews cost, `gbrain reindex-code --yes` runs it. Cost preview gated via `ConfirmationRequired` envelope on non-TTY callers, exit code 2 matches `sync --all`.
+
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor                           # expect schema_version >= 28
+   gbrain code-callers <your-favorite-fn>  # expect a JSON array of call sites
+   gbrain query "some concept in your brain" --walk-depth 1
+   gbrain stats
+   ```
+
+4. **If any step fails or the numbers look wrong,** file an issue at https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
+### Itemized changes
+
+**Layer 1 — Foundation schema migration (v27).** All DDL lands first, before any consumer. `content_chunks` gains `parent_symbol_path TEXT[]`, `doc_comment TEXT`, `symbol_name_qualified TEXT`, `search_vector TSVECTOR`. `sources` gains `chunker_version TEXT` (SP-1 gate). Two new tables: `code_edges_chunk` (resolved, FK CASCADE both ways) + `code_edges_symbol` (unresolved qualified-name edges). Plpgsql trigger `update_chunk_search_vector` weights doc_comment + symbol_name_qualified 'A', chunk_text 'B'. Per codex SP-4: every downstream layer has its schema prerequisites before referencing them. `scripts/check-jsonb-pattern.sh` + migration tests pin the DDL shape so accidental drift surfaces in CI.
+
+**Layer 2 (1a) — File-classifier widening.** `src/core/sync.ts` expands from 9 recognized code extensions to 35 — Rust, Ruby, Java, C#, C/C++, Swift, Kotlin, Scala, PHP, Elixir, Elm, OCaml, Dart, Zig, Solidity, Lua, shell, etc. New `resolveSlugForPath(path)` centralizes slug dispatch (SP-5 fix) so delete/rename paths honor the same code-vs-markdown classification as import. Layer 9 (Magika) fallback hook ready via `setLanguageFallback`.
+
+**Layer 3 (1b) — Chunk-grain FTS with page-grain wrap.** `searchKeyword` now ranks internally at chunk grain via the new `search_vector`, then dedups to best-chunk-per-page before returning. External shape unchanged (SP-6 decision) — every `searchKeyword` caller (`enrichment-service`, `backlinks`, `list_pages`) sees the same page-grain result. A2 two-pass consumes the raw chunk-grain primitive via the new `searchKeywordChunks` method. Weight A (doc_comment + symbol_name_qualified) > Weight B (chunk_text) means docstring matches rank above prose for NL queries.
+
+**Layer 4 (B1) — Language manifest foundation.** The hardcoded `GRAMMAR_PATHS` + `DISPLAY_LANG` maps collapse into one `LANGUAGE_MANIFEST` keyed by `LanguageEntry` (embeddedPath | lazyLoader | displayName). `registerLanguage` / `unregisterLanguage` / `listRegisteredLanguages` are extension points; downstream consumers can add grammars without forking the chunker. 29 shipped embedded today; the lazy-load path is forward-compat for the full 165-language pack.
+
+**Layer 5 (A1) — Edge extractor + qualified names (8 langs).** The 10x leap. `src/core/chunkers/edge-extractor.ts` walks the tree-sitter tree iteratively (no recursion — generated code trees can blow the stack) and harvests call-site edges per-language. `src/core/chunkers/qualified-names.ts` builds identity strings per-language: Ruby `Admin::UsersController#render`, Python `admin.users.UsersController.render`, TS `BrainEngine.searchKeyword`, Rust `users::UsersController::render`. `importCodeFile` calls `deleteCodeEdgesForChunks` (codex SP-2 inbound invalidation) then `addCodeEdges`. Both engines (PGLite + Postgres) implement all 5 edge methods: `addCodeEdges`, `deleteCodeEdgesForChunks`, `getCallersOf`, `getCalleesOf`, `getEdgesByChunk`. Readers UNION both tables forever (codex 1.3b: no promotion).
+
+**Layer 6 (A3) — Parent-scope + nested-chunk emission.** A class with 3 methods emits 4 chunks now: the class-level scope header (slim body: declaration line + member digest) + each method with `parentSymbolPath: ['ClassName']`. Chunk headers show `(in ClassName.method)` so the embedding captures scope. Recursive expansion: Ruby `module Admin { class Users { def render } }` emits 3 chunks — Admin, Users (parent=[Admin]), render (parent=[Admin, Users]). `mergeSmallSiblings` bails when scope chunks are present (methods emitted individually on purpose; merging would erase the parent-path metadata).
+
+**Layer 7 (A2) — Two-pass structural retrieval.** `src/core/search/two-pass.ts` expands an anchor set up to 2 hops through `code_edges_chunk` + `code_edges_symbol`, unresolved-edge targets resolved by symbol_name_qualified lookup. Score decay 1/(1+hop). Default OFF per codex F5. Activation: `--walk-depth N` (1 or 2) or `--near-symbol <qualified-name>`. Neighbor cap 50 per hop. Dedup per-page cap lifts from 2 → `min(10, walkDepth × 5)` when walking.
+
+**Layer 8 (D) — Tier D bundle.** Three deferred items from v0.19.0 ship here. **D1** `sync --all` cost preview via `estimateTokens` + `EMBEDDING_COST_PER_1K_TOKENS = 0.00013` + `ConfirmationRequired` envelope (TTY prompt or exit-2 on non-TTY / JSON / piped). **D2** markdown fence extraction — `importFromContent` walks marked lexer tokens, extracts recognized `{type:'code', lang, text}` fences through `chunkCodeText` with pseudo-path, persists as `chunk_source='fenced_code'`. 100-fence-per-page cap (env override `GBRAIN_MAX_FENCES_PER_PAGE`). **D3** `reconcile-links` batch command — forward-scans every markdown page via `extractCodeRefs`, reinserts missing doc↔impl edges idempotently (`ON CONFLICT DO NOTHING`). Respects `auto_link=false` config.
+
+**Layer 10 (C) — Agent CLI surfaces.** `query --lang typescript` and `query --symbol-kind function|class|method` filter at SQL level (C1 + C2). `code-callers <symbol>` (C4) and `code-callees <symbol>` (C5) ship as new commands — auto-JSON on non-TTY, StructuredAgentError on failure. `query --near-symbol <qualified> --walk-depth 1..2` (C3) wires A2 two-pass through the query operation. C6 (`code-signature`) deferred to v0.20.1 per plan.
+
+**Layer 12 — CHUNKER_VERSION 3 → 4 + SP-1 gate.** The ship-silent bug codex caught on second pass: bumping `CHUNKER_VERSION` alone did nothing on an unchanged repo because `performSync` returns `up_to_date` before reaching `importCodeFile`'s content_hash check. Fix: `sources.chunker_version` tracks the version that last synced each source; mismatch forces a full re-walk regardless of git HEAD equality. `writeChunkerVersion` called after every `writeSyncAnchor 'last_commit'`.
+
+**Layer 13 (E2) — reindex-code + migration orchestrator.** `gbrain reindex-code [--source <id>] [--dry-run] [--yes] [--force] [--json]` — explicit backfill for users who want v0.21.0 benefits NOW (before next sync). Walks code pages in batches of 100 (Finding 4.4 OOM protection). Reuses D1's cost-preview gate. `--force` bypasses `importCodeFile`'s content_hash early-return. `src/commands/migrations/v0_21_0.ts` orchestrator: schema → backfill-prompt → verify phases. Idempotent, resumable.
+
+**Layer 11 (E1) — BrainBench code sub-category tests.** `test/cathedral-ii-brainbench.test.ts` pins `call_graph_recall` (getCallersOf round-trip through real importCodeFile, with re-import idempotency validated) and `parent_scope_coverage` (nested methods persist parent_symbol_path, qualified names resolve). `doc_comment_matching` and `type_signature_retrieval` deferred to v0.20.1 with A4 full extraction + C6 respectively.
+
+**Layer 9 (B2) — Magika auto-detect: DEFERRED to v0.20.1.** The fallback hook (`setLanguageFallback`) is in place at `src/core/chunkers/code.ts`. The `detectCodeLanguage` call order already accommodates a `null → fallback` path. Bundling the ~1MB Magika ONNX model through `bun --compile` surfaces integration risk that the plan explicitly allowed deferring. Tracked in TODOS.md.
+
+**Test coverage.** +900 lines of new test cases across 11 new test files:
+- `test/chunker-version-gate.test.ts`, `test/migrations-v0_21_0.test.ts` (Layer 1 schema + Layer 12 gate)
+- `test/sync-classifier-widening.test.ts` (Layer 2)
+- `test/chunk-grain-fts.test.ts` (Layer 3)
+- `test/language-manifest.test.ts` (Layer 4)
+- `test/qualified-names.test.ts`, `test/edge-extractor.test.ts`, `test/code-edges.test.ts` (Layer 5)
+- `test/parent-scope.test.ts` (Layer 6)
+- `test/two-pass.test.ts` (Layer 7)
+- `test/sync-cost-preview.test.ts`, `test/fence-extraction.test.ts`, `test/reconcile-links.test.ts` (Layer 8)
+- `test/search-lang-symbol-kind.test.ts`, `test/code-callers-cli.test.ts` (Layer 10)
+- `test/reindex-code.test.ts`, `test/migration-orchestrator-v0_21_0.test.ts` (Layer 13)
+- `test/cathedral-ii-brainbench.test.ts` (Layer 11)
+
+Final CI: 2407 pass / 250 skip / 0 fail / 6345 expect() / 467s.
+
+**Credit.** Plan reviewed by 2 codex passes + 1 plan-eng-review + 1 plan-ceo-review. 16 cross-model findings (7 + 6 + 3) all absorbed — notably codex SP-1 (chunker_version silent no-op), SP-2 (inbound edge invalidation across re-imports), SP-3 (multi-source tenancy), SP-4 (layer bisectability), SP-5 (slug dispatcher), SP-6 (FTS page-grain external contract), SP-7 (no promotion, UNION-on-read forever). The release's correctness on those 3 ship-silent bugs + real bisectability is directly attributable to the two codex passes on a cathedral-scale plan.
+
+## [0.19.0] - 2026-04-23
+
+## **Your code is now first-class in the brain.**
+## **`gbrain code-refs BrainEngine --json` returns every usage site in <100ms.**
+
+Until this release, gbrain was a markdown brain. An agent asking "how do we handle partial sync failures" got back the guide and the CHANGELOG post-mortem. It got nothing from the actual code. Not because the feature was missing — because the chunker treated a TypeScript file as prose. v0.19.0 makes code a first-class citizen alongside markdown: 29 languages parsed by tree-sitter into semantic chunks, each with a structured header (`[TypeScript] src/core/sync.ts:380-415 function performFullSync`), queryable by symbol name with a new `code-def` / `code-refs` command pair that ships agent-safe JSON by default.
+
+The flagship moment for the agent persona: `gbrain code-refs BrainEngine --json` returns a clean array of `{file, line, symbol_name, snippet}` tuples in under 100ms on a 25-file corpus. No grep. No full-file reads. The brain knows where BrainEngine is used, and the agent can feed the response directly into its next reasoning step. Brain-first lookup finally covers code.
+
+The cost story: daily autopilot on a 5K-file TS repo would have been ~$30/month of OpenAI embedding spend. v0.19.0's incremental chunker diffs chunks by `(chunk_index, chunk_text)` — unchanged symbols reuse their embedding, only new or edited code hits the API. Typical edit touches 2-5% of chunks, so the daily bill drops ~95% to pennies.
+
+The honest part: the chunker ships as a **strict superset of Chonkie's CodeChunker**. 29 languages (vs 6 baseline), tiktoken `cl100k_base` tokenizer for accurate budgeting (not the 2-3x-off `len/4` heuristic), small-sibling merging so 30 top-level imports don't produce 30 embedding calls, AST-aware splitting of large nodes. Tree-sitter WASMs ship embedded in the `bun --compile` binary — the silent-failure mode Codex flagged during plan review got closed by a CI guard that proves semantic chunks actually come out of the compiled binary. Every release runs it.
+
+### The numbers that matter
+
+Counted against gbrain's own codebase (~300 TypeScript files), PGLite in-memory benchmark:
+
+| Metric | v0.18.x (markdown-only) | v0.19.0 (code-aware) | Δ |
+|---|---|---|---|
+| Code indexing languages | 0 | 29 | +29 |
+| Chunk metadata columns | chunk_text only | + language, symbol_name, symbol_type, start/end_line | +5 |
+| `code-refs BrainEngine` surface | not possible | JSON array in <100ms | ∞ |
+| Daily autopilot embedding cost (5K code files, 5% churn) | ~$1.50/day naive | ~$0.05/day incremental | 30x |
+| Tokenizer accuracy vs OpenAI cl100k_base | 2-3x off (len/4) | exact (tiktoken) | tight |
+
+### What this means for builders
+
+If you build with gbrain + OpenClaw + Claude Code: add your repo as a source (`gbrain sources add gbrain --path .`) and sync with strategy=code. Ask your agent to "look at gbrain" — it gets the full symbol graph, not just the README. If you're shipping your own gstack fork on top of gbrain: your agent's brain-first lookup now covers code, which closes the largest remaining gap where agents fell back to grep. If you're Garry wondering what `performFullSync` does: `gbrain code-def performFullSync` and you get the answer without opening a file.
+
+### Itemized changes
+
+**Layer 0 — Wintermute's baseline (cherry-picked, author scrubbed).** Tree-sitter code chunker for 6 languages (TS/TSX/JS/Python/Ruby/Go), `gbrain repos add/list/remove`, strategy-aware sync, `PageType 'code'`, `importCodeFile`, per-file sync progress via the v0.15.2 reporter. Preserved exactly, committed under Garry's author identity.
+
+**Layer 1 — A6 structured errors + version bump.** New `src/core/errors.ts` exports `StructuredAgentError` + `buildError` + `serializeError`. Matches the v0.17.0 `CycleReport.PhaseResult.error` shape so agent-consumable errors stay consistent across every gbrain surface. `globToRegex` bug fix: `src/**/*.ts` now matches `src/foo.ts` (zero intermediate dirs). `GBRAIN_HOME` env var for test isolation. `package.json` → `0.19.0`.
+
+**Layer 2 — `bun --compile` WASM embedding + CI guard.** Codex flagged the node_modules-at-runtime approach as the #1 silent-failure mode for v0.19.0. Fix: WASMs committed to `src/assets/wasm/`, loaded via `import path from ... with { type: 'file' }`. Bun bundles every asset referenced this way into the compiled binary. `scripts/check-wasm-embedded.sh` compiles a smoketest binary on every `bun test` run and asserts it produces real semantic chunks. If the chunker ever silently falls through to recursive again, the build breaks.
+
+**Layer 3 — schema migrations v25 + v26.** `pages.page_kind TEXT CHECK (page_kind IN ('markdown','code'))` on v25, using Postgres's `NOT VALID` + `VALIDATE CONSTRAINT` split so tables with millions of pages don't hold a write lock during the ALTER. `content_chunks` adds `language`, `symbol_name`, `symbol_type`, `start_line`, `end_line` on v26, plus partial indexes keyed on non-null values so code-chunk lookups stay cheap on mixed markdown+code brains.
+
+**Layer 4 — delete Wintermute's multi-repo, wire v0.18.0 sources.** The `repos` abstraction in Wintermute's baseline turned out to be redundant with v0.18.0's `sources` subsystem (per-source `last_commit`, `federated` search config, RLS-friendly, DB-native). v0.19.0 keeps `gbrain repos` as a deprecated alias that routes into `runSources`. `sync --all` iterates the `sources` table instead of a local config array. Codex's P0 #2 (per-repo sync bookmarks) and P0 #3 (slug collision) both resolved by the existing schema.
+
+**Layer 5 — Chonkie chunker parity (E2a).** 6 languages → 29. Embedded asset paths for every grammar in `tree-sitter-wasms`. Accurate tokenizer via `@dqbd/tiktoken` `cl100k_base` (lazy-init). Small-sibling merging with the Chonkie `bisect_left` pattern tuned to 15% of chunk target, so tiny siblings (imports, single-line consts) collapse while substantive classes/functions stay independent. `CHUNKER_VERSION=3` folded into `importCodeFile`'s `content_hash` so chunker-shape changes across releases force clean re-chunks without `sync --force`.
+
+**Layer 6 — incremental chunking (E2) + doc↔impl linking (E1).** `importCodeFile` reads existing chunks before embedding; any chunk whose `(chunk_index, chunk_text)` matches verbatim reuses the existing embedding, saving the OpenAI call. `extractCodeRefs` in `link-extraction.ts` scans markdown prose for references like `src/core/sync.ts:42`; `importFromContent` creates bidirectional `documents` / `documented_by` edges for every match. The agent can now walk from guide to code and back.
+
+**Layer 7 — `code-def` + `code-refs` CLI surfaces.** The magical-moment commands. Both bypass the standard `searchKeyword` path (DISTINCT ON (slug) collapses to one result per page — wrong for code-refs). Auto-JSON when stdout is not a TTY (gh-CLI convention). Structured error envelope for the usage-error + catch-all paths. `--lang` / `--limit` / `--json` / `--no-json` flags across both commands.
+
+**Layer 8 — BrainBench code category (E2E).** 11-test E2E suite against PGLite in-memory, 5 languages × 5 service files = 25-file fictional corpus, asserts `code-def` and `code-refs` retrieval quality plus the <100ms magical-moment budget. Reproducible on CI without OpenAI keys (embeddings disabled — tests cover retrieval metadata, not vector quality).
+
+**Test coverage.** 91 new unit + E2E tests across 9 new files: `test/errors.test.ts`, `test/sync-strategy.test.ts`, `test/migrations-v0_19_0.test.ts`, `test/repos-alias.test.ts`, `test/chunkers/code.test.ts`, `test/link-extraction-code-refs.test.ts`, `test/incremental-chunking.test.ts`, `test/code-def-refs.test.ts`, `test/e2e/code-indexing.test.ts`. 357 assertions, all green against PGLite.
+
+**Credit.** Baseline tree-sitter chunker + multi-repo scaffolding came from a community PR (author scrubbed per the privacy rule). The v0.19.0 rework on top — cathedral scope, Chonkie parity, doc↔impl linking, incremental chunking, the sources reconciliation, and the full test suite — was driven by the /plan-ceo-review + /plan-devex-review + /plan-eng-review + /codex review chain. Codex's outside-voice pass caught 4 P0s (baseline-not-in-tree, per-repo bookmarks, slug collision, chunk schema gap) that the in-model reviews missed. All 4 are fixed in the ship.
+
+## To take advantage of v0.19.0
+
+`gbrain upgrade` runs `apply-migrations` which lands v25 + v26 automatically. If `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Add your code repo as a source and sync:**
+   ```bash
+   gbrain sources add my-repo --path /path/to/repo
+   gbrain sync --source my-repo
+   ```
+   (Or `gbrain repos add my-repo --path ...` — the deprecated alias still works.)
+3. **Verify code indexing works:**
+   ```bash
+   gbrain code-def BrainEngine
+   gbrain code-refs BrainEngine --json
+   ```
+4. **Observe the cost delta.** After a full sync, run an `autopilot` cycle. Incremental chunking means the second cycle's embedding cost is ~5% of the first.
+5. **If the compiled binary produces no symbol names** (everything falls to recursive chunks): your install may have skipped the WASM assets. File an issue with `gbrain doctor` output.
+
+## [0.20.4] - 2026-04-24
+
+**Minions skill consolidation, now honest about what the CLI actually does.**
+
+One skill for background work instead of two. Shell jobs and LLM subagents land under `skills/minion-orchestrator/` with a shared Preconditions block, accurate CLI examples, and a trigger set narrowed to what the skill actually covers. Corrects four documentation bugs the prior merge shipped ... `submit_job name="shell"` isn't MCP-callable, `research`/`orchestrate` aren't real handler names, PGLite users don't need to migrate to Supabase, and "every background task goes through Minions" contradicts the `pain_triggered` default in `skills/conventions/subagent-routing.md`. The skill now matches the code.
+
+Two new tests guard this surface going forward. `test/resolver.test.ts` gets a round-trip check (every quoted RESOLVER.md trigger must resolve to a frontmatter `triggers:` entry in the target skill) and a name validator (every `name="<word>"` reference in any SKILL.md must resolve to either a declared operation in `src/core/operations.ts` or a known Minions handler). The validator would have caught the `research`/`orchestrate` drift in CI instead of from a Codex cold-read. One new E2E test (`test/e2e/minions-shell-pglite.test.ts`) exercises the PGLite `--follow` inline path, previously documented but untested.
+
+### For users
+
+- Shell jobs via `gbrain jobs submit shell --params '{"cmd":"..."}'` (operator/CLI only ... MCP returns `permission_denied` for protected names). Subagent jobs via `gbrain agent run` (user-facing entrypoint). Both lanes route through one skill.
+- PGLite shell-job guidance now correctly points at `--follow` for inline execution. The persistent daemon mode is still Postgres-only, but you do not need to migrate.
+- `gbrain jobs submit` and `submit a gbrain job` now route to the skill; bare "gbrain jobs" no longer does (it was too broad ... the CLI namespace covers 9 subcommands, and questions about `stats`/`prune`/`retry` fall through to `gbrain --help`).
+
+### Added
+
+- New E2E test `test/e2e/minions-shell-pglite.test.ts` covering the PGLite `--follow` inline shell-job path. Runs in-memory, no DATABASE_URL required.
+- Resolver round-trip test in `test/resolver.test.ts`: every quoted RESOLVER.md trigger must have a fuzzy match in the target skill's frontmatter `triggers:` list.
+- Skill-example-name validator in `test/resolver.test.ts`: every `name="<word>"` reference in any `SKILL.md` body must resolve to an op in `src/core/operations.ts` or a Minions handler in `PROTECTED_JOB_NAMES`.
+
+### Fixed
+
+- `skills/minion-orchestrator/SKILL.md` shell-job examples use the real `--params` JSON form instead of nonexistent `--cmd`/`--argv`/`--cwd` flags.
+- `gbrain agent run` flag list now matches `src/commands/agent.ts` (removed `--queue`/`--priority`/`--max-attempts`/`--delay` which aren't parsed by that command).
+- `--tools` example uses `search,query` instead of `web_search` (the latter isn't in `BRAIN_TOOL_ALLOWLIST`, would throw at submit time).
+- MCP boundary wording says `submit_job name="shell"` throws an `OperationError` with code `permission_denied`, instead of the earlier "returns permission_denied" (not a return, a throw).
+- `skills/conventions/subagent-routing.md` stale reference to `get_job_stats` (no such op) replaced with `list_jobs --status active` or `gbrain jobs stats`.
+- `skills/query/SKILL.md` + `skills/maintain/SKILL.md` frontmatter `triggers:` lists closed gaps the new round-trip test surfaced (RESOLVER.md was routing 10 triggers to these skills that their frontmatter never declared).
+- `skills/manifest.json` minion-orchestrator description updated to match the unified SKILL.md framing.
+
+### Changed
+
+- Trigger `"gbrain jobs"` narrowed to `"gbrain jobs submit"` + `"submit a gbrain job"` in both `skills/RESOLVER.md` and the skill's frontmatter.
+- Anti-pattern about `sessions_spawn` scoped to the subagent lane (was ambiguous in the consolidated skill).
+
+### For contributors
+
+- Code-to-doc drift is now partially machine-checkable. The skill-example-name validator catches T2-class bugs (docs referencing handler/op names that don't exist). CLI flag validation is a remaining gap ... a future PR could extend the test to validate `--flag-name` patterns in SKILL.md against actual CLI flag parsers.
+
+## To take advantage of v0.20.4
+
+Any gbrain user whose agent routes on "minions" work gets the corrected skill on the next `gbrain upgrade`. No manual migration required ... the renamed trigger is additive (old trigger gone, new triggers cover the same intent), and the doc corrections don't change runtime behavior.
+
+1. **Run the orchestrator manually if `gbrain upgrade` reports a partial migration:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Your agent picks up the new skill content** next time it consults `skills/minion-orchestrator/SKILL.md`. No action required on your side.
+3. **Verify the outcome:**
+   ```bash
+   gbrain check-resolvable --json | python3 -c "import json,sys;d=json.load(sys.stdin);print('ok:',d['ok'])"
+   ```
+   Should print `ok: True`.
+4. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+
+## [0.20.3] - 2026-04-24
+
+## **Your queue now rescues itself when a wedged worker holds a row lock. Wall-clock sweep kills the job that stall detection can't see.**
+## **`maxWaiting` is race-proof, observable, and reachable from the CLI — three bugs in one patch.**
+
+A production autopilot-cycle job wedged for over an hour on a single OpenClaw deployment because the worker's handler got stuck mid-transaction holding a row lock. Both eviction paths were blocked: the stall detector's `FOR UPDATE SKIP LOCKED` pass skipped the row-locked candidate, and the timeout sweep's `lock_until > now()` predicate disqualified the job once lock-renewal had been blocked. Neither could see the job. The shell-job pipeline starved completely behind the wedge.
+
+v0.19.0 shipped the wall-clock sweep as the third-layer kill shot: drop both constraints, evict on `started_at` alone, worst case at `2 × timeout_ms + stalledInterval`. This release locks down three correctness holes the v0.19.0 PR introduced — then closes the observability gap that let the incident run to minute 90 in the first place.
+
+### The queue-resilience numbers that matter
+
+Measured against the real incident on 2026-04-23 (OpenClaw autopilot + shell-job pipeline, Postgres engine, concurrency=1 worker).
+
+| Behavior | Before v0.20.3 | After v0.20.3 |
+|---|---|---|
+| Wedged worker escape window | 90+ minutes (manual kill) | `~2 × timeout_ms + 30s` sweep interval |
+| Per-name waiting pile during wedge | 18 deferred per-slot jobs | capped at `maxWaiting` |
+| `maxWaiting` under concurrent submit (2 submitters, cap=2) | up to 3 rows (TOCTOU race) | exactly 2 rows (advisory-lock serialization) |
+| Same name across queues | cross-queue bleed — `shell` suppressed by `default` | isolated per `(name, queue)` |
+| `GBRAIN_WORKER_CONCURRENCY=foo` | silent wedge (`inFlight < NaN` false) | clamped to 1, loud stderr warning |
+| `gbrain jobs submit --max-waiting 2` | flag didn't exist | wired through to MinionJobInput |
+| Silent coalesce events | invisible | JSONL audit at `~/.gbrain/audit/backpressure-YYYY-Www.jsonl` |
+| `gbrain doctor` visibility into wedge | no check | new `queue_health` with 2 subchecks |
+
+The two big shifts: (1) every silent-failure vector the v0.19.0 patches introduced now has a loud signal — JSONL audit files, doctor check, stderr warnings, peer-liveness probe. (2) `maxWaiting` is now actually a cap under concurrency, not a soft suggestion. A future multi-submitter pattern (parallel workspaces, dispatched children, OpenClaw + ycli cron) doesn't walk through it.
+
+### What this means for OpenClaw users
+
+If you're running `gbrain autopilot` on a daily-driver deployment, the wall-clock sweep is the difference between a 90-minute outage and a 30-second one. The `queue_health` doctor check means the next time your queue wedges, you notice in minute 2 instead of minute 90. If you've been writing programmatic Minion submitters and setting `maxWaiting`, it's worth re-reading the JSONL audit file the next time your agent does anything "interesting" — you'll see exactly which submission coalesces into which returned job.
+
+## To take advantage of v0.20.3
+
+`gbrain upgrade` handles the binary. You MUST restart long-running worker daemons so the new sweep runs in-process — the wall-clock eviction is a method on `MinionQueue`, not a cron job, so it only fires inside a worker loop.
+
+1. **Upgrade the binary:**
+   ```bash
+   gbrain upgrade
+   ```
+2. **Restart autopilot + workers:**
+   ```bash
+   # systemd / launchd / OpenClaw service-manager: restart the unit.
+   # Manual: kill the old `gbrain autopilot` and `gbrain jobs work`, start new ones.
+   ```
+3. **Verify:**
+   ```bash
+   gbrain jobs smoke --wedge-rescue   # exercises the new wall-clock path
+   gbrain doctor --json | jq '.checks[] | select(.name == "queue_health")'
+   ```
+4. **If `gbrain doctor` flags anything unexpected,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/audit/backpressure-*.jsonl` (redact freely)
+   - what commands you ran leading up to the wedge
+
+### Itemized changes
+
+**Queue core** (`src/core/minions/queue.ts`)
+- `maxWaiting` coalesce path wraps `count → select → insert` in `pg_advisory_xact_lock` keyed on `(name, queue)`. Concurrent submitters for the SAME key serialize; different keys stay parallel. Lock auto-releases on transaction commit/rollback — no cleanup path to leak. Fixes TOCTOU race caught by adversarial review.
+- `maxWaiting` count and select now filter on `queue` in addition to `name`. Pre-v0.20.3 code filtered on name alone, so a waiting `autopilot-cycle` in `queue=default` would suppress submissions to `queue=shell` with the same name. Cross-queue bleed is gone.
+
+**Backpressure observability** (new `src/core/minions/backpressure-audit.ts`)
+- Every coalesce event writes one JSONL line to `~/.gbrain/audit/backpressure-YYYY-Www.jsonl` (ISO-week rotation, override dir via `GBRAIN_AUDIT_DIR`, mirrors the v0.14 shell-audit pattern).
+- Fields: `ts, queue, name, waiting_count, max_waiting, decision='coalesced', returned_job_id`.
+- Best-effort: write failures log to stderr but never block submission.
+
+**CLI** (`src/commands/jobs.ts`)
+- New `--max-waiting N` flag on `gbrain jobs submit`. Clamps to `[1, 100]`, mirrors the existing `--max-stalled` wiring. The `MinionJobInput.maxWaiting` field was programmatic-only before; now it's reachable from the command line too.
+- `resolveWorkerConcurrency` clamps against invalid input. `parseInt` returns `NaN` for `"foo"`, `0` for `"0"`, negatives for `"-5"` — all of which silently wedge a worker (`inFlight.size < NaN/0/negative` is always false). Now clamped to ≥1 with a loud stderr warning naming the bad value. One typo in a systemd unit no longer reproduces the 90-minute outage.
+- New `gbrain jobs smoke --wedge-rescue` opt-in case. Forges a wedged-worker row state, invokes `handleStalled` + `handleTimeouts` + `handleWallClockTimeouts` in sequence, asserts only the wall-clock sweep evicts. Mirrors the v0.14.3 `--sigkill-rescue` shape.
+
+**Doctor** (`src/commands/doctor.ts`)
+- New `queue_health` check (Postgres-only; PGLite skips with `Skipped (PGLite — no multi-process worker surface)`).
+- Subcheck 1 — **stalled-forever**: flags active jobs whose `started_at` is older than 1 hour. Reports the top 5 by start time with `gbrain jobs get/cancel <id>` fix hints.
+- Subcheck 2 — **waiting-depth**: flags per-name queues whose waiting count exceeds threshold. Default 10, overridable via `GBRAIN_QUEUE_WAITING_THRESHOLD` env. Reports the top 5 by depth with "consider setting maxWaiting on the submitter" fix hint.
+- Worker-heartbeat staleness subcheck intentionally deferred to follow-up because `lock_until`-on-active-jobs is a lossy proxy. A check that cries wolf erodes trust in every other doctor subcheck. Needs a `minion_workers` table to produce ground-truth signal.
+
+**Autopilot** (`src/commands/autopilot.ts`)
+- `--no-worker` mode gains a peer-worker-liveness probe. Every cycle runs a cheap `SELECT count(*)` checking for active jobs with `lock_until` refreshed in the last 2 minutes. After 3 consecutive idle ticks, logs a loud `WARNING` naming the silent-wedge vector (`--no-worker` set but no worker running). Re-arms once a live signal returns, so a healthy-but-idle worker doesn't trigger spam.
+- Probe is documented as a proxy, not ground truth — idle worker with no active jobs reads as "no worker." The ground-truth fix needs a `minion_workers` heartbeat table (tracked as follow-up).
+
+**Docs**
+- New `docs/guides/queue-operations-runbook.md`: the "my queue looks wedged — what do I run?" reference. One viewport, in order of escalation. What each `queue_health` subcheck means. Self-check for the `--no-worker + no-worker-running` footgun.
+- `CLAUDE.md` Key-files section updated for the new `handleWallClockTimeouts` method (v0.19.0, described here for the first time), the new `backpressure-audit.ts` module, the updated `maxWaiting` semantics, and the new `queue_health` doctor check.
+
+**Tests** (`test/minions.test.ts`)
+- 23 new unit cases. Wall-clock sweep (3 cases + non-interference with `handleTimeouts`). `maxWaiting` (coalesce, clamp 0 → 1, floor 1.7 → 1, concurrent-submitter race via `Promise.all`, cross-queue isolation, unset fallthrough). Concurrency clamp (7 cases including `NaN`/`0`/negative). `parseMaxWaitingFlag` (5 cases). Backpressure audit file write. All 143 minions tests pass.
+- E2E wall-clock case against real Postgres is next on the roadmap (needs a second-connection row-lock helper; the unit-level coverage above exercises the sweep mechanics directly).
+
+### For contributors
+
+- The v0.19.0 PR's narrative framed the 18-job pileup as "duplicate submissions from a cron loop with no idempotency key." That framing was wrong. Autopilot already sets `idempotency_key: autopilot-cycle:${slot}` where slot is a 5-minute tick boundary — within-slot duplicates are structurally impossible. The 18 jobs were 18 different slots stacking up behind the wedged one. `maxWaiting` still caps the pile; the incident just wasn't about idempotency. Adversarial review caught this before v0.20.3 shipped.
+- Follow-up issues tracked: B2 (autopilot heartbeat file), B3 (doctor `--fix` learns queue rescue), B4 (backpressure counts surfaced in `jobs stats`), B5 (cross-cutting "health-delivery-agent" pattern), B7 (`minion_workers` heartbeat table — unblocks both the dropped `queue_health` subcheck and a ground-truth `--no-worker` probe), P1 (composite indexes `(status, started_at)` and `(status, name)` on `minion_jobs` — currently the new sweeps fall back to `idx_minion_jobs_status`, selective enough on healthy queues, worth tightening in v0.20.4).
+
+Full plan with CEO + Eng + Codex adversarial decisions lives at `~/.claude/plans/` for the operators who care about how this release was reviewed.
+
+## [0.20.2] - 2026-04-24
+
+## **`gbrain jobs supervisor` is now a self-healing daemon you can actually drive. The Minions worker stops dying silently.**
+## **Three commands an agent can run: `start --detach`, `status --json`, `stop`. Crash loops are bounded, audit events are JSONL, and the health check finally reports real data.**
+
+`gbrain jobs work` has always been the worker that drains your Minions queue. Problem: it dies (OOM, connection blip, panic) and nobody notices until jobs pile up. The old answer was `nohup` plus a 68-line bash watchdog script from the deployment guide, and it shipped its own bugs (restart-loop traps, log-parsing stall detection, zero audit trail).
+
+v0.20.2 ships the replacement: `gbrain jobs supervisor` is a first-class CLI with atomic PID locking, exponential backoff, structured audit events at `~/.gbrain/audit/supervisor-YYYY-Www.jsonl`, and three subcommands that make it drivable by an OpenClaw or Hermes agent in three turns. The old bash watchdog is gone.
+
+### The numbers that matter
+
+Before v0.20.2, an agent driving the supervisor needed ~10 turns of shell archaeology (PID file scraping, `pgrep -f`, `kill -0`, log grep) just to start and stop the worker reliably. After v0.20.2, it's three commands with machine-parseable output.
+
+| Capability | Before v0.20.2 | After v0.20.2 |
+|---|---|---|
+| Keeping the worker alive | `nohup` + `minion-watchdog.sh` (68 lines of bash, restart-loop bug, log-scrape health) | `gbrain jobs supervisor` (first-class CLI with atomic PID lock, exponential backoff, JSONL audit) |
+| PID file locking | `existsSync + readFileSync + writeFileSync` TOCTOU race | Atomic `O_CREAT|O_EXCL` via `openSync('wx')` — kernel-atomic mutex |
+| Stalled-jobs health alert | Queried `status='stalled'` — returned 0 rows forever (dead code) | Queries `status='active' AND lock_until < now()`, scoped to the supervised queue |
+| Shell-exec env inheritance | Child inherited `GBRAIN_ALLOW_SHELL_JOBS=1` from parent shell regardless of CLI flag | Explicit `else delete env.GBRAIN_ALLOW_SHELL_JOBS` when not opted in + regression test |
+| Agent discovery TTHW | ~10 turns of shell-scraping (cat PID / pgrep / kill -0 / log grep) | 3 turns: `start --detach` → `status --json` → `stop` |
+| Lifecycle observability | `console.log` with human prefixes, zero audit trail | JSONL events on stderr + `~/.gbrain/audit/supervisor-YYYY-Www.jsonl` + `gbrain doctor` integration |
+| Exit codes | undocumented; agent couldn't distinguish "already running" from "gave up" | Four documented codes: `0` clean, `1` max-crashes, `2` lock-held, `3` PID-unwritable |
+| Test coverage of the supervisor itself | ~15% (backoff math + PID helpers only) | Integration tests covering crash-restart, max-crashes drain, SIGTERM-during-backoff, env-inheritance regression |
+
+The supervisor's own reliability claims are now testable. Every lifecycle event (`started`, `worker_spawned`, `worker_exited`, `backoff`, `health_warn`, `max_crashes_exceeded`, `shutting_down`, `stopped`, `worker_spawn_failed`) lands in a weekly-rotated JSONL file that `gbrain doctor` reads to surface a `supervisor` health check.
+
+### What this means for your deployment
+
+If you were using the old `nohup`/`minion-watchdog.sh` pattern:
+
+1. **Stop the old watchdog:** `sudo kill $(head -n1 /tmp/gbrain-worker.pid) 2>/dev/null && crontab -e` and delete the watchdog cron line.
+2. **Delete the script:** `sudo rm -f /usr/local/bin/minion-watchdog.sh /tmp/gbrain-worker.pid /tmp/gbrain-worker.log`.
+3. **Start the supervisor:** `gbrain jobs supervisor start --detach --json` — or on systemd, reinstall the unit (now calls `gbrain jobs supervisor`).
+4. **Verify:** `gbrain doctor` reports a `supervisor` check; `gbrain jobs supervisor status --json` returns `running:true`.
+
+For containers (Fly / Railway / Render / Heroku): the shipped `Procfile` and `fly.toml.partial` now call `gbrain jobs supervisor`. The platform restarts the container on host events, the supervisor restarts the worker on in-process crashes. Two-layer supervision with clean separation.
+
+For OpenClaw / Hermes / Cursor agents driving the supervisor: you no longer need a shell skill to drive the worker. Every piece of state — liveness, crash history, max-crashes exhaustion — is a machine-parseable JSON response. Start with `gbrain jobs supervisor status --json | jq`.
+
+## To take advantage of v0.20.2
+
+`gbrain upgrade` pulls the binary. Nothing else is required if you're currently running `gbrain jobs work` directly or using systemd — the new supervisor is opt-in. To migrate:
+
+1. **Verify the binary:**
+   ```bash
+   gbrain --version   # should say 0.20.2
+   gbrain jobs supervisor --help | head -20
+   ```
+2. **Start the supervisor (detached, agent-friendly):**
+   ```bash
+   gbrain jobs supervisor start --detach --json
+   # → {"event":"started","supervisor_pid":1234,"pid_file":"/Users/you/.gbrain/supervisor.pid","detached":true}
+   ```
+3. **Check health:**
+   ```bash
+   gbrain jobs supervisor status --json
+   gbrain doctor | grep supervisor
+   ```
+4. **Stop when done:**
+   ```bash
+   gbrain jobs supervisor stop
+   ```
+5. **(Optional) Migrate off the old watchdog:** see `docs/guides/minions-deployment.md` "Upgrading from an older deployment" for the cron-to-supervisor migration.
+
+If `gbrain jobs supervisor status` reports `running:false` unexpectedly, or `gbrain doctor` flags a `supervisor` failure, file an issue at https://github.com/garrytan/gbrain/issues with:
+- output of `gbrain doctor`
+- the last ~50 lines of `~/.gbrain/audit/supervisor-*.jsonl`
+- which step broke
+
+### Itemized changes
+
+**`gbrain jobs supervisor`:**
+- New subcommands: `start [--detach] [--json]`, `status [--json]`, `stop [--json]`. Foreground use is unchanged (back-compat).
+- New flags: `--allow-shell-jobs` (explicit opt-in, replaces env-var sniffing), `--cli-path PATH` (override auto-resolution), `--json` (JSONL lifecycle events on stderr), `GBRAIN_SUPERVISOR_PID_FILE` env var (overrides default PID path).
+- Exit codes documented in `--help`: `0` clean, `1` max-crashes, `2` lock-held, `3` PID-unwritable.
+- Default PID path moved from `/tmp/gbrain-supervisor.pid` to `~/.gbrain/supervisor.pid` with automatic parent-directory creation.
+
+**Safety fixes (codex adversarial review + eng review):**
+- Atomic PID lock via `openSync(path, 'wx')` — two supervisors starting simultaneously can no longer both win the race.
+- `stalled` health check query rewritten from unreachable `status='stalled'` to `status='active' AND lock_until < now()` matching `queue.ts:848 handleStalled()`.
+- Health queries now scoped to `WHERE queue = $1` — multi-queue deployments see the right queue.
+- Unified exit path via `shutdown(reason, exitCode)` — max-crashes drains gracefully instead of bypassing cleanup via `process.exit(1)`.
+- Listener ref tracking: `SIGTERM`/`SIGINT` handlers removed on shutdown for clean test lifecycle.
+
+**Security hardening:**
+- `allowShellJobs` class default flipped `true` → `false`.
+- Child env now has `GBRAIN_ALLOW_SHELL_JOBS` explicitly deleted when `allowShellJobs:false` (was: silently inherited from parent shell).
+- Integration regression test locks this against future refactors.
+
+**Observability:**
+- New `src/core/minions/handlers/supervisor-audit.ts` with ISO-week rotation (mirrors `shell-audit.ts` / `subagent-audit.ts` pattern).
+- Every supervisor emission (started, worker_spawned, worker_exited, worker_spawn_failed, backoff, health_warn, health_error, max_crashes_exceeded, shutting_down, stopped) written to `~/.gbrain/audit/supervisor-YYYY-Www.jsonl`.
+- `gbrain doctor` gains a `supervisor` check that reads the audit file and reports `running` / `last_start` / `crashes_24h` / `max_crashes_exceeded` with thresholds (ok / warn at 3+ crashes / fail on max-crashes event).
+
+**Documentation:**
+- `docs/guides/minions-deployment.md` rewritten: supervisor is the canonical answer; which-supervisor-when decision table (container / systemd / dev laptop); three-command agent pattern; migration block from the old watchdog.
+- `README.md` Operations section gains a paragraph on `gbrain jobs supervisor`.
+- `docs/guides/minions-deployment-snippets/{systemd.service,Procfile,fly.toml.partial}` now invoke `gbrain jobs supervisor` instead of raw `gbrain jobs work`.
+- `docs/guides/minions-deployment-snippets/minion-watchdog.sh` deleted — subsumed by the supervisor.
+
+**Tests:**
+- `test/supervisor.test.ts`: 7 → 13 tests. Four new integration tests exercise real `spawn()` lifecycles via shell-script fakes (crash-restart happy path, max-crashes-via-shutdown with audit assertions, SIGTERM-during-backoff clean exit, `GBRAIN_ALLOW_SHELL_JOBS` inheritance regression — positive + negative).
+- `test/fixtures/supervisor-runner.ts`: new standalone runner that constructs a supervisor from env vars so integration tests can observe `process.exit` without killing the test runner.
+
+**For contributors:**
+- The `MinionSupervisor` class has a test-only `_backoffFloorMs` override for fast crash-loop tests. Not exposed via CLI.
+- `onEvent: (emission) => void` is an injectable hook on `SupervisorOpts` — Lane C's audit writer uses it; future observability integrations can too.
+- `autopilot.ts` migration to `MinionSupervisor` is explicitly deferred (follow-up PR): the current `start()` API blocks, which deadlocks autopilot's interval loop. Codex's review flagged this; the fix is a non-blocking-start API redesign, not a drop-in substitution.
+
+Credit: original supervisor feature built by OpenClaw (PR #364 initial commit). Review wave + code-level fixes + daemon-manager CLI + observability boomerang + integration tests shipped via /autoplan (CEO + DX + Eng + Codex adversarial) followed by a 20-item multi-lane implementation plan.
+
+## [0.20.0] - 2026-04-23
+
+## **BrainBench moves out. gbrain gets its install surface back.**
+## **The eval harness + 5MB fictional corpus now live in a sibling repo; gbrain exposes a clean public API they consume.**
+
+BrainBench is gbrain's benchmark harness. 10/12 Cats, 4-adapter scorecard, 418-item fictional corpus, 314 tests. Previously it lived inside this repo. Every `bun install` pulled down the eval tree, `docs/benchmarks/*.md` reports, `pdf-parse` devDep, and auxiliary test fixtures whether or not you ever ran a benchmark. For the 99% of gbrain users who want a knowledge-brain CLI, that's ~5MB of noise.
+
+v0.20 moves BrainBench to [github.com/garrytan/gbrain-evals](https://github.com/garrytan/gbrain-evals). gbrain stays the knowledge-brain CLI + library. `gbrain-evals` depends on gbrain via GitHub URL and consumes it through the public exports map. Same benchmarks, same scorecards, same Cat runners, same 418-item fictional amara-life corpus, just a separate install. Folks who don't care about evals never download them. Folks who do clone one extra repo.
+
+The clean separation also gives gbrain a first real public API surface. `package.json` adds 11 new subpath exports (`gbrain/engine`, `gbrain/pglite-engine`, `gbrain/search/hybrid`, `gbrain/link-extraction`, `gbrain/extract`, and so on) covering every gbrain internal the eval harness reaches into. Third-party tools (not just BrainBench) now have a stable contract to consume. Removing any of these exports is a breaking change going forward.
+
+### What moved where
+
+| Stays in gbrain | Moves to gbrain-evals |
+|-----------------|----------------------|
+| `src/` (CLI, MCP, engines, operations, skills runtime) | `eval/` (runners, adapters, generators, schemas, gold, cli) |
+| `Page.type` enum including `email/slack/calendar-event/note/meeting` (useful for any ingested format, not just evals) | `test/eval/` (314 tests across 14 files) |
+| `inferType()` heuristics for the new directory patterns | `docs/benchmarks/*.md` (all scorecards + regression reports) |
+| Public exports map (11 new subpaths gbrain-evals consumes) | `pdf-parse` devDep (only eval/runner/loaders/pdf.ts used it) |
+| `src/core/` test suite (1696 tests) | `eval:*` scripts (run from gbrain-evals now) |
+
+### What this means for you
+
+If you install gbrain via `git clone + bun install` or via npm/clawhub, you get a smaller, cleaner checkout. No eval corpus. No benchmark reports. No pdf-parse. `bun test` runs only gbrain's own test suite, not eval tests.
+
+If you want to run BrainBench: `git clone https://github.com/garrytan/gbrain-evals && cd gbrain-evals && bun install && bun run eval:run`. gbrain-evals fetches gbrain from GitHub via `"gbrain": "github:garrytan/gbrain#master"` so you always benchmark against the latest source.
+
+If you're a third-party library author importing gbrain internals: the new exports map is now your stable contract. Pin `gbrain/<subpath>` imports against a version, not a file path.
+
+### Itemized changes
+
+**Extracted to [gbrain-evals](https://github.com/garrytan/gbrain-evals):**
+- `eval/` ... schemas, runners, adapters, generators, queries, CLI tools, docs (CONTRIBUTING, RUNBOOK, CREDITS).
+- `test/eval/` ... 14 test files, 314 tests covering schemas, sealed qrels, tool-bridge, agent adapter, judge, recorder, Cat 5/6/8/9/11, amara-life skeleton, adversarial-injections, pdf loader.
+- `docs/benchmarks/` ... all scorecards and regression reports (4-adapter, v0.11 vs v0.12, Minions production/lab, tweet ingestion, knowledge runtime v0.13, BrainBench v1).
+- `pdf-parse` devDep ... only consumed by `eval/runner/loaders/pdf.ts`.
+- `eval:*` package.json scripts ... now live in gbrain-evals's `package.json` and run from there.
+
+**Kept in gbrain (useful beyond evals):**
+- `Page.type` enum extensions in `src/core/types.ts`: `email | slack | calendar-event | note | meeting`. Any user ingesting an inbox dump, Slack export, iCal file, or meeting transcript benefits from first-class types.
+- `inferType()` heuristics in `src/core/markdown.ts` for `/emails/`, `/slack/`, `/cal/`, `/notes/`, `/meetings/` directory patterns.
+- 11 new public `exports` in `package.json`: `./pglite-engine`, `./link-extraction`, `./import-file`, `./transcription`, `./embedding`, `./config`, `./markdown`, `./backoff`, `./search/hybrid`, `./search/expansion`, `./extract`. These form gbrain's public-API contract for downstream consumers.
+
+**Docs synced:**
+- `README.md` ... benchmark references now point at the gbrain-evals repo.
+- `CLAUDE.md` ... BrainBench section replaced with a pointer to gbrain-evals + the list of public exports that consumers depend on.
+- `src/commands/migrations/v0_12_0.ts` ... migration banner text references `github.com/garrytan/gbrain-evals` instead of a local `docs/benchmarks/*.md` path that no longer resolves.
+
+**Tests:** 1717 gbrain tests pass, 0 failures, 174 skipped (E2E requiring `DATABASE_URL`). The full eval suite (314 tests) moves with `gbrain-evals` and runs from there.
+
+### To take advantage of v0.20
+
+For gbrain users:
+1. `gbrain upgrade` ... no action required. The extraction is transparent.
+2. If you previously ran `bun run eval:*` scripts from this repo: those scripts no longer exist here. `git clone https://github.com/garrytan/gbrain-evals && bun install` to get them.
+
+For gbrain-evals consumers:
+1. Clone the sibling repo: `git clone https://github.com/garrytan/gbrain-evals`
+2. `bun install && bun run eval:run`
+3. Follow `gbrain-evals/eval/RUNBOOK.md` for full category runs and scorecard reproduction.
+
+## [0.19.1] - 2026-04-24
+
+### Added
+
+- New `gbrain smoke-test` CLI command. Runs 8 post-restart health checks with auto-fix: Bun runtime, gbrain CLI loads, database reachable via doctor, worker process liveness, OpenClaw Codex plugin Zod CJS (auto-reinstall when the zod@4 package ships without `core.cjs`), OpenClaw gateway responding, embedding API key present, brain repo exists. User-extensible via drop-in scripts at `~/.gbrain/smoke-tests.d/*.sh`. Designed to run from OpenClaw bootstrap hooks so every container restart automatically verifies and repairs the environment.
+- `skills/smoke-test/` skill with full documentation, pattern for adding new tests, and a growing known-issue database (starting with the Zod `core.cjs` publish bug discovered 2026-04-23).
+- `smoke-test` routing entry in `skills/RESOLVER.md` under Operational, so agents reach the skill on "post-restart health", "did the container restart break anything", and "smoke test" triggers.
+
+### Fixed
+
+- Doctor's `resolver_health` check now passes on fresh installs: `skills/smoke-test/` is wired into `RESOLVER.md` so the cascade that was flagging it unreachable (and dragging `gbrain doctor` to exit 1 on healthy brains) no longer fires.
+- `skills/smoke-test/SKILL.md` gains the required `## Anti-Patterns` and `## Output Format` sections, so `test/skills-conformance.test.ts` no longer flags it.
+- `llms-full.txt` regenerated to reflect the new RESOLVER row. The drift guard in `test/build-llms.test.ts` now passes.
+
 ## [0.19.0] - 2026-04-22
 
 ## **Your OpenClaw finally learns. Say "skillify it!" and every new failure becomes a durable skill.**
