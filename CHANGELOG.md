@@ -80,6 +80,53 @@ If you run `gbrain jobs supervisor` (the production-recommended path), `gbrain u
 
 - The watchdog cleanup path (`gracefulShutdown`) is intentionally co-located with `MinionWorker.stop()`. When a third caller appears (e.g., a future `pause()` method), extracting `unifiedShutdown(reason)` becomes worth the refactor. Until then, three lines is not a DRY emergency.
 - `isRetryableDbConnectError()` lives in `src/core/db.ts` and owns its own 5-pattern matcher. PR #406 (when it merges) introduces a 13-pattern matcher in `src/core/minions/supervisor.ts`; the right move at that merge is to delete the supervisor's local copy and import from `db.ts` (correct dependency direction, low → high). A follow-up TODO captures this.
+## [0.22.1] - 2026-04-26
+
+**Autopilot stops being a noisy neighbor.**
+
+Five hotfixes shipping together: incremental extract, cooperative cycle abort, supervisor watchdog reconnect, session-level connection timeouts, and server-side embed-stale filtering. The wave's theme is unified: gbrain's overnight maintenance loop was reading too much, ignoring abort signals, and quietly poisoning shared infrastructure when things went wrong. After this release the loop only reads pages that changed, bails cleanly when timeouts fire, and recovers from connection-pool poisoning without manual intervention.
+
+### For everyone
+
+These two fixes apply to both PGLite (default install) and Postgres / Supabase users:
+
+- **#417 incremental extract** — `gbrain dream` cycles no longer re-read every markdown file when only a handful changed. The cycle still walks the directory tree to build the link-resolution set (a fast `readdir` pass), but `readFileSync` runs only on pages sync flagged as added or modified. On a 54,461-page production brain this turned a 10-minute extract phase into a sub-second pass; on a 500-page brain you get the same proportional win.
+- **#403 cycle abort** — when a cycle phase hits a per-job timeout, `runCycle` now bails at the next phase boundary instead of grinding through extract → embed → orphans while the worker thinks the job is done. A 30-second grace-then-evict safety net in `MinionWorker` frees the slot even if a future handler ignores the abort signal entirely. Cooperative — can't interrupt a phase mid-execution — but prevents the cascade that was wedging workers.
+
+### For Postgres / Supabase users
+
+Three fixes that no-op on PGLite (no network, no pooler, no per-connection state):
+
+- **#406 supervisor watchdog reconnect** — when the connection pool gets poisoned (PgBouncer rotation, Supabase pool bounce), the supervisor's watchdog now detects three consecutive health-check failures and calls `engine.reconnect()` to swap in a fresh pool. Workers crash cleanly on poisoned connections; supervisor catches it within ~3 health-check intervals (~3 minutes) instead of staying degraded until manual restart. Recovery is structural, not per-call magic.
+- **#363 session timeouts** *(Contributed by @orendi84)* — every Postgres connection now sets `statement_timeout` and `idle_in_transaction_session_timeout` as connection-time startup parameters. An orphaned pgbouncer backend can no longer hold a `RowExclusiveLock` for hours and block schema migrations. Defaults: 5 minutes each. Override per-GUC via `GBRAIN_STATEMENT_TIMEOUT` / `GBRAIN_IDLE_TX_TIMEOUT` / `GBRAIN_CLIENT_CHECK_INTERVAL`. Closes #361.
+- **#409 embed egress** *(Contributed by @atrevino47)* — `embed --stale` now filters server-side on `embedding IS NULL` instead of pulling every chunk's `vector(1536)` over the wire and discarding the unwanted ones client-side. On a fully-embedded 1.5K-page brain that's the difference between ~76 MB per call and a single `count()` round-trip. With autopilot firing every 5–10 minutes plus a 2-hour cron, one production user blew past Supabase's 5 GB free-tier ceiling at 102 GB used — that pattern is gone now. Two new `BrainEngine` methods (`countStaleChunks`, `listStaleChunks`) plus a consistency fix in `upsertChunks` so when `chunk_text` changes without a new embedding, both `embedding` and `embedded_at` reset to NULL together (no more "embedded_at says yes, embedding says NULL").
+
+### Production proof point
+
+The wave was driven by a 54,461-page OpenClaw production deployment where extract took 600+ seconds and the queue stalled at 20–36 waiting jobs (all returning `skipped: cycle_already_running`). All five fixes ran as hotfixes there for 12+ hours stable before this release. The numbers are extreme; the underlying bugs are not.
+
+### Eng-review tightening
+
+The original #406 wrapped `executeRaw` in a per-call retry that auto-recovered from connection errors. Eng-review dropped that wrapper as unsound — a SQL-prefix regex isn't a safe idempotence boundary (writable CTEs, side-effecting SELECTs). What ships from #406 is the structural reconnect path, not the per-call retry. Recovery moves up one layer to the supervisor watchdog. See `TODOS.md` for the planned caller-opt-in retry follow-up.
+
+### Test coverage
+
+15 new test cases across `test/extract-incremental.test.ts` (new), `test/core/cycle.test.ts`, and `test/connection-resilience.test.ts`:
+- 8 cases for `#417`: empty/undefined slugs, [a,b]-only reads, deleted-file handling, mode filter, dry-run, BATCH_SIZE flush, full-slug-set resolution.
+- 4 cases for `#417` + Codex F2: cycle threads `pagesAffected` into extract, full-walk fallback, F2 noExtract gating (full cycle vs sync-only).
+- 3 cases for D3: `executeRaw` has no per-call retry wrapper, `reconnect()` still exists, supervisor still has 3-strikes path.
+
+### To take advantage of v0.22.1
+
+No manual step. PGLite users get the universal fixes automatically on next cycle. Postgres users additionally get session timeouts on the next pool reconnect, server-side stale filtering on the next `embed --stale`, and supervisor reconnect on the next pool poisoning event.
+
+```bash
+gbrain upgrade
+gbrain doctor    # verify (optional)
+```
+
+If anything looks wrong post-upgrade, file an issue: https://github.com/garrytan/gbrain/issues with `gbrain doctor` output.
+
 ## [0.22.0] - 2026-04-25
 
 **Search stops getting swamped by chat logs. Curated pages win by default.**
@@ -361,7 +408,6 @@ If you build with gbrain + OpenClaw + Claude Code: add your repo as a source (`g
    ```
 4. **Observe the cost delta.** After a full sync, run an `autopilot` cycle. Incremental chunking means the second cycle's embedding cost is ~5% of the first.
 5. **If the compiled binary produces no symbol names** (everything falls to recursive chunks): your install may have skipped the WASM assets. File an issue with `gbrain doctor` output.
-=======
 
 ## [0.20.4] - 2026-04-24
 
