@@ -2,6 +2,80 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.22.0] - 2026-04-25
+
+## **Every real query your agents run now gets captured for replay.**
+## **BrainBench-Real: the benchmark that tests YOUR workload, not a fictional one.**
+
+v0.20 (gbrain-evals extraction) and v0.21 (Cathedral II) gave gbrain its install surface back and turned code into a first-class graph. The remaining gap was data: `amara-life`, the fictional 418-item corpus over in gbrain-evals, is great for reproducibility but not for catching regressions against the queries your agents *actually* serve. v0.22 ships the substrate: every `query` and `search` call through MCP, CLI, or the subagent tool-bridge gets recorded into a new `eval_candidates` table. `gbrain eval export` streams the rows as NDJSON. Point gbrain-evals at the stream and you have BrainBench-Real on every release.
+
+Capture is on by default. PII is scrubbed at write time (emails, phones, SSN, Luhn-verified credit cards, JWTs, bearer tokens). Queries over 50KB get rejected. RLS matches the v0.18.1 / v0.21.0 posture ... new tables get enabled on Postgres, gated on BYPASSRLS so it never locks an operator out of their own data. `gbrain doctor` surfaces silent capture failures cross-process so if something stops working you see it in health checks, not three weeks later when the replay numbers look weird.
+
+Cathedral II (v0.21.0) callers are unaffected. `hybridSearch` still returns `Promise<SearchResult[]>` ... meta arrives via an optional `onMeta` callback in `HybridSearchOpts`, used only by the op-layer capture wrapper to record what hybridSearch *actually* did (vector ran or fell back, expansion fired or didn't, post-auto-detect detail).
+
+### The numbers that matter
+
+Measured on this branch's diff against v0.21.0:
+
+| Metric | v0.21.0 | v0.22.0 | Δ |
+|---|---|---|---|
+| Real-query capture | none | every MCP/CLI/subagent `query` + `search` | **the whole feature** |
+| PII classes redacted at write | 0 | 6 (email, phone, SSN, CC+Luhn, JWT, bearer) | ... |
+| Schema columns per captured row | ... | 16 (tool, query, slugs, chunks, source_ids, expand_enabled, detail, detail_resolved, vector_enabled, expansion_applied, latency, remote, job_id, subagent_id, created_at, id) | ... |
+| `hybridSearch` return shape | `Promise<SearchResult[]>` | `Promise<SearchResult[]>` (unchanged) | 0 break |
+| `hybridSearch` opts surface | existing | + `onMeta?: (m: HybridSearchMeta) => void` | additive |
+| BrainEngine methods | shipped Cathedral II surface | +5 eval-capture | **BREAKING for custom engines** |
+| Public subpath exports | 17 | 17 (now contract-tested) | 0 drift |
+| New tests | ... | 82 (14 engine round-trip + 17 scrubber + 21 capture module + 8 hybrid meta + 10 op-layer capture + 9 export + 5 prune + 30 public-exports) | ... |
+
+### What this means for you
+
+**Brain operators (the 99%):** run `gbrain upgrade`. Capture turns on. Run agents as usual. After a week, `gbrain eval export --since 7d > real.ndjson` has your workload snapshot. Point gbrain-evals at it for regression gating on your next release. To disable: edit `~/.gbrain/config.json` and set `"eval": {"capture": false}`.
+
+**Anyone calling `hybridSearch` directly:** no change required. The return type is still `Promise<SearchResult[]>`. If you want the new meta side-channel, pass `onMeta: (m) => { ... }` in opts — otherwise leave it undefined and pay no cost.
+
+**Downstream TypeScript consumers implementing their own BrainEngine:** five new methods need implementations ... `logEvalCandidate`, `listEvalCandidates`, `deleteEvalCandidatesBefore`, `logEvalCaptureFailure`, `listEvalCaptureFailures`. Return types are in `src/core/types.ts`. This is why v0.22.0 is a minor bump.
+
+## To take advantage of v0.22.0
+
+`gbrain upgrade` runs `gbrain apply-migrations --yes` which applies v30 automatically. If it didn't:
+
+1. **Apply the migration manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+
+2. **Verify the tables exist:**
+   ```bash
+   psql $DATABASE_URL -c '\d eval_candidates'
+   psql $DATABASE_URL -c '\d eval_capture_failures'
+   gbrain doctor   # should show "eval_capture: No capture failures in the last 24h"
+   ```
+
+3. **Dogfood capture for a week:**
+   ```bash
+   # Run your normal agent workflow, then:
+   gbrain eval export --since 7d | head
+   gbrain doctor   # still clean? capture is healthy
+   ```
+
+4. **If something looks wrong:** `gbrain doctor` names the `eval_capture_failures` breakdown. File an issue with the breakdown + your config shape at https://github.com/garrytan/gbrain/issues.
+
+### Itemized changes
+
+- v30 migration: `eval_candidates` + `eval_capture_failures` on both Postgres + PGLite, RLS gated on BYPASSRLS, CHECK constraints + indexes
+- Op-layer capture wrapper in `src/core/operations.ts` (covers MCP + CLI + subagent tool-bridge from one site)
+- PII scrubber in `src/core/eval-capture-scrub.ts` (6 regex families, adversarial-input safe)
+- Cross-process audit via `eval_capture_failures` + `gbrain doctor` 24h breakdown
+- `gbrain eval export` (NDJSON, schema_version:1, EPIPE-safe) + `gbrain eval prune` (explicit retention)
+- `hybridSearch` adds `onMeta?: (m) => void` to opts (Cathedral II callers unaffected)
+- `BrainEngine` gains 5 methods (breaking-interface for custom engines, drives v0.22.0 minor bump)
+- `test/public-exports.test.ts` + `scripts/check-exports-count.sh` lock the 17-subpath public surface
+- Config gains `eval: {capture?, scrub_pii?}` (file-plane only)
+- `listEvalCandidates` orders `created_at DESC, id DESC` (deterministic export windows)
+- `docs/eval-capture.md` — stable NDJSON schema reference for gbrain-evals
+- +82 unit tests across 8 new files; 0 regressions
+
 ## [0.21.0] - 2026-04-25
 
 ## **Your brain walks the code graph now.**
