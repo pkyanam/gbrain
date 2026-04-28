@@ -42,6 +42,21 @@ export async function runExport(engine: BrainEngine, args: string[]) {
 
   // Load storage configuration if repo path is provided
   const storageConfig = repoPath ? loadStorageConfig(repoPath) : null;
+
+  // D5 + Codex P0: refuse --restore-only when there's no storage config to
+  // scope the restore. Without storageConfig, the selective filter (db_only
+  // pages missing on disk) can't run, and falling through to the full
+  // listPages export silently dumps the entire DB. Catch this before any
+  // page query fires.
+  if (restoreOnly && !storageConfig) {
+    console.error(
+      `Error: gbrain export --restore-only requires a storage tiering config\n` +
+        `(gbrain.yml with a "storage:" section) at ${repoPath}/gbrain.yml.\n` +
+        `Without it, there's nothing to scope the restore to.\n` +
+        `Run \`gbrain storage status\` to inspect the current configuration.`,
+    );
+    process.exit(1);
+  }
   
   // Build filters. slugPrefix is engine-side (Issue #13) — no in-memory
   // post-filter, no full-table load.

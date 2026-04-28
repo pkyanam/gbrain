@@ -19,6 +19,7 @@ import type { SyncManifest } from '../core/sync.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { loadStorageConfig } from '../core/storage-config.ts';
+import { getDefaultSourcePath } from '../core/source-resolver.ts';
 
 export interface SyncResult {
   status: 'up_to_date' | 'synced' | 'first_sync' | 'dry_run' | 'blocked_by_failures';
@@ -824,6 +825,13 @@ export async function runSync(engine: BrainEngine, args: string[]) {
       try {
         const result = await performSync(engine, repoOpts);
         printSyncResult(result);
+        // Codex P2: --all loop must also manage .gitignore per-source. Without
+        // this, multi-source users who rely on `gbrain sync --all` never get
+        // the advertised db_only ignore rules unless they sync each repo
+        // individually.
+        if (result.status !== 'dry_run' && result.status !== 'blocked_by_failures') {
+          manageGitignore(src.local_path!, engine.kind);
+        }
       } catch (e: unknown) {
         console.error(`Error syncing ${src.name}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -850,16 +858,17 @@ export async function runSync(engine: BrainEngine, args: string[]) {
   if (!watch) {
     const result = await performSync(engine, opts);
     printSyncResult(result);
-    // Issue #2 + eng-review pass-2 finding #1: manage .gitignore ONLY on
-    // successful sync. Skip on dry-run (don't mutate disk in preview mode)
+    // Issue #2 + eng-review pass-2 finding #1 + Codex P1: manage .gitignore ONLY
+    // on successful sync. Skip on dry-run (don't mutate disk in preview mode)
     // and blocked_by_failures (sync state is inconsistent — defer .gitignore
-    // until next clean run).
-    if (
-      opts.repoPath &&
-      result.status !== 'dry_run' &&
-      result.status !== 'blocked_by_failures'
-    ) {
-      manageGitignore(opts.repoPath, engine.kind);
+    // until next clean run). Resolve the effective repo path so the wire-up
+    // fires in the common case where the user runs `gbrain sync` without
+    // passing --repo every time.
+    if (result.status !== 'dry_run' && result.status !== 'blocked_by_failures') {
+      const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
+      if (effectiveRepoPath) {
+        manageGitignore(effectiveRepoPath, engine.kind);
+      }
     }
     return;
   }
@@ -877,12 +886,12 @@ export async function runSync(engine: BrainEngine, args: string[]) {
         console.log(`[${ts}] Synced: +${result.added} ~${result.modified} -${result.deleted} R${result.renamed}`);
       }
       // Same gate as non-watch: only manage .gitignore on successful sync.
-      if (
-        opts.repoPath &&
-        result.status !== 'dry_run' &&
-        result.status !== 'blocked_by_failures'
-      ) {
-        manageGitignore(opts.repoPath, engine.kind);
+      // Same repo-resolution path so watch mode catches the implicit-resolved case.
+      if (result.status !== 'dry_run' && result.status !== 'blocked_by_failures') {
+        const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
+        if (effectiveRepoPath) {
+          manageGitignore(effectiveRepoPath, engine.kind);
+        }
       }
     } catch (e: unknown) {
       consecutiveErrors++;

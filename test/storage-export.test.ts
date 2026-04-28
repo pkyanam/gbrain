@@ -114,13 +114,26 @@ describe('export --restore-only resolution chain (D5)', () => {
   });
 
   test('falls back to sources default local_path when --repo absent', async () => {
-    // Configure default source path, no gbrain.yml — restore-only finds 0 pages
-    // (no storage config means storageConfig is null; the restore-only branch
-    // requires storageConfig to be truthy, so it falls to the else branch and
-    // exports everything — but pages table is empty so it's still 0).
+    // Configure default source path, write a real gbrain.yml so the storage
+    // config check passes — without gbrain.yml the Codex-P0 guard correctly
+    // refuses --restore-only (no storage config to scope to).
     await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [tmp]);
+    writeFileSync(
+      join(tmp, 'gbrain.yml'),
+      `storage:\n  db_tracked: []\n  db_only:\n    - media/x/\n`,
+    );
     await tryRunExport(['--dir', outDir, '--restore-only']);
     expect(exitCode).toBeNull(); // resolution succeeded
+  });
+
+  test('refuses --restore-only when no storage config is present (Codex P0)', async () => {
+    // Default source has a path but no gbrain.yml. Without a storage config,
+    // --restore-only would silently fall through to a full export — exactly
+    // the silent-footgun D5 was supposed to prevent.
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [tmp]);
+    await tryRunExport(['--dir', outDir, '--restore-only']);
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toMatch(/storage tiering config|gbrain\.yml/);
   });
 
   test('non-restore export does NOT require --repo (D26)', async () => {

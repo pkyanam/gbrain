@@ -232,6 +232,33 @@ describe('getDefaultSourcePath', () => {
     await expect(getDefaultSourcePath(engine, '/random/dir')).rejects.toThrow(/connection refused/);
   });
 
+  test('falls back to legacy sync.repo_path config when sources.local_path is null', async () => {
+    // Pre-v0.18 brains: 'default' source exists but local_path is NULL; the
+    // repo path lives in the global config table under sync.repo_path.
+    const engine = {
+      kind: 'pglite',
+      executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+        if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
+          return [{ id: params?.[0] } as unknown as T];
+        }
+        if (sql.includes('SELECT local_path FROM sources WHERE id = $1')) {
+          return [{ local_path: null } as unknown as T];
+        }
+        if (sql.includes('SELECT id, local_path FROM sources')) {
+          return [];
+        }
+        return [];
+      },
+      getConfig: async (key: string) => {
+        if (key === 'sources.default') return null;
+        if (key === 'sync.repo_path') return '/legacy/brain/path';
+        return null;
+      },
+    } as unknown as BrainEngine;
+    const path = await getDefaultSourcePath(engine, '/random/dir');
+    expect(path).toBe('/legacy/brain/path');
+  });
+
   test('respects source resolution chain (registered local_path wins over default)', async () => {
     // CWD is inside /custom/path → wiki source matches by path → wiki's local_path returned.
     const engine = makeStubWithPaths(
