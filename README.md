@@ -614,8 +614,11 @@ SEARCH
   gbrain query <question>              Hybrid search (vector + keyword + RRF)
 
 IMPORT
-  gbrain import <dir> [--no-embed]      Import markdown (idempotent)
-  gbrain sync [--repo <path>]           Git-to-brain incremental sync
+  gbrain import <dir> [--no-embed] [--workers N]
+                                        Import markdown (idempotent)
+  gbrain sync [--repo <path>] [--workers N]
+                                        Git-to-brain incremental sync
+                                        (>100-file diffs auto-parallelize 4 workers on Postgres)
   gbrain export [--dir ./out/]          Export to markdown
 
 FILES
