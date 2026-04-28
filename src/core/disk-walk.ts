@@ -18,7 +18,7 @@
  *     etc. are tracked by the brain but not via slugs.
  */
 
-import { readdirSync, statSync, type Stats } from 'fs';
+import { readdirSync, statSync, type Stats, type Dirent } from 'fs';
 import { join } from 'path';
 
 export interface DiskFileEntry {
@@ -39,9 +39,14 @@ export function walkBrainRepo(repoPath: string): Map<string, DiskFileEntry> {
   const result = new Map<string, DiskFileEntry>();
 
   function recurse(dirPath: string, slugPrefix: string): void {
-    let entries: ReturnType<typeof readdirSync>;
+    // Annotate as Dirent[] explicitly: ReturnType<typeof readdirSync> with
+    // withFileTypes:true picks an overload union that includes
+    // Dirent<Buffer<ArrayBufferLike>>, which makes entry.name a Buffer in
+    // strict tsc mode. Cast to the string-based Dirent[] (same shape sync.ts
+    // uses for its own filesystem walk).
+    let entries: Dirent[];
     try {
-      entries = readdirSync(dirPath, { withFileTypes: true });
+      entries = readdirSync(dirPath, { withFileTypes: true }) as unknown as Dirent[];
     } catch {
       return; // unreadable directory — skip silently
     }
