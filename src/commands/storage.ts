@@ -6,6 +6,16 @@ import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
 import { getDefaultSourcePath } from '../core/source-resolver.ts';
 
 /**
+ * Distinct nominal types for the two tier-keyed numeric maps. Both shapes
+ * are `Record<StorageTier, number>` structurally — but they carry
+ * semantically different units (page COUNT vs disk BYTES). Distinct types
+ * make accidental swaps a compile-time error rather than a silent display
+ * bug. Issue #11 of the eng review.
+ */
+export type PageCountsByTier = Record<StorageTier, number> & { __brand?: 'page-counts' };
+export type DiskUsageByTier = Record<StorageTier, number> & { __brand?: 'disk-bytes' };
+
+/**
  * Pure-data result of a storage-status query. No side effects, no I/O
  * beyond the engine call and one filesystem walk. Consumed by both the
  * JSON formatter and the human formatter; kept narrow so it's a stable
@@ -15,9 +25,9 @@ export interface StorageStatusResult {
   config: StorageConfig | null;
   repoPath: string | null;
   totalPages: number;
-  pagesByTier: Record<StorageTier, number>;
+  pagesByTier: PageCountsByTier;
   missingFiles: Array<{ slug: string; expectedPath: string }>;
-  diskUsageByTier: Record<StorageTier, number>;
+  diskUsageByTier: DiskUsageByTier;
   warnings: string[];
 }
 
@@ -73,8 +83,8 @@ export async function getStorageStatus(
   const config = repoPath ? loadStorageConfig(repoPath) : null;
   const warnings = config ? validateStorageConfig(config) : [];
 
-  const pagesByTier: Record<StorageTier, number> = { db_tracked: 0, db_only: 0, unspecified: 0 };
-  const diskUsageByTier: Record<StorageTier, number> = { db_tracked: 0, db_only: 0, unspecified: 0 };
+  const pagesByTier: PageCountsByTier = { db_tracked: 0, db_only: 0, unspecified: 0 };
+  const diskUsageByTier: DiskUsageByTier = { db_tracked: 0, db_only: 0, unspecified: 0 };
   const missingFiles: Array<{ slug: string; expectedPath: string }> = [];
 
   // Single recursive walk of the brain repo (Issue #14). Replaces per-page
