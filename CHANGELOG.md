@@ -3,12 +3,12 @@
 All notable changes to GBrain will be documented in this file.
 ## [0.22.7] - 2026-04-28
 
-## **Built-in HTTP transport with bearer auth. Remote MCP without the OAuth footgun.**
-## **Postgres-only by design, default-deny CORS, two-bucket rate limit, body cap, full audit trail.**
+## **Built-in HTTP transport with bearer auth for remote MCP.**
+## **Postgres-backed tokens, default-deny CORS, two-bucket rate limit, body cap, per-request audit.**
 
-A standalone OAuth wrapper used to expose `gbrain serve` over HTTP allowed unauthenticated client registration ... an attacker who discovered the URL could `POST /register`, mint a `client_credentials` token, and read the entire brain. v0.22.7 ships `gbrain serve --http`: the smallest correct HTTP transport you can build on top of `access_tokens`. No OAuth surface, no registration endpoint, no self-service tokens. Bearer-only, with the existing `gbrain auth create/list/revoke` already managing the lifetime.
+v0.22.7 ships `gbrain serve --http`: a built-in HTTP transport for remote MCP, authenticating via the existing `access_tokens` table that `gbrain auth create/list/revoke` already manages. Bearer-only, no OAuth surface, no registration endpoint, no self-service tokens. SECURITY.md is the canonical reference for the hardening posture and recommended deployment.
 
-Because this is the security-sensitive path your agent talks to, the hardening lives inside the transport, not in the doc:
+The hardening lives inside the transport, not in the doc:
 
 | Layer | Default | Configurable via |
 |---|---|---|
@@ -20,11 +20,11 @@ Because this is the security-sensitive path your agent talks to, the hardening l
 | Per-request audit | `mcp_request_log` row per `/mcp` | (existing schema, since v4) |
 | Reverse-proxy trust | off | `GBRAIN_HTTP_TRUST_PROXY=1` to honor X-Forwarded-For |
 
-The IP rate-limit fires **before** the DB lookup so we actually limit brute-force load against `access_tokens`, not just response codes. The token-id rate limit fires after auth so legitimate-but-runaway clients get throttled at the right principal. Both buckets live in a bounded LRU map (default 10K keys, TTL prune at 2× window) so attacker-controlled keys can't grow memory unbounded.
+The IP rate-limit fires **before** the auth lookup so the limit caps load on the auth path itself, not just response codes. The token-id rate limit fires after auth so a runaway authenticated client gets throttled at the right principal. Both buckets live in a bounded LRU map (default 10K keys, TTL prune at 2× window) so unique-key growth can't drift into memory pressure.
 
 ### What changed for users
 
-You can now expose GBrain remotely without the standalone OAuth wrapper:
+You can now expose GBrain remotely with the built-in transport:
 
 ```bash
 gbrain auth create my-laptop                    # tokens managed via the existing CLI
@@ -32,22 +32,15 @@ gbrain serve --http --port 8787                  # Postgres-only; PGLite users s
 ngrok http 8787 --url your-brain.ngrok.app       # any tunnel works
 ```
 
-Then point Claude Desktop, claude.ai/code, or any MCP client at `http://your-tunnel/mcp` with `Authorization: Bearer <token>`. CORS, rate limits, and body caps are on by default.
-
-### Bug fixes folded in
-
-While ripping the transport out and rebuilding it, three pre-existing bugs in the original PR landed at the same time:
-
-- **Reversed handler arguments.** The original transport called `op.handler(args, ctx)`. Stdio calls `op.handler(ctx, params)`. Every `tools/call` either crashed or behaved incorrectly, which the test suite never caught. Both transports now go through one shared `dispatchToolCall` in `src/mcp/dispatch.ts`.
-- **Incomplete `OperationContext`.** The original built `{engine, remote: true}` (2 fields). Stdio builds 5 (engine + config + logger + dryRun + remote). Operations that read `ctx.config` or `ctx.logger` silently misbehaved. Same `dispatchToolCall` fixes this.
-- **No param validation.** Malformed args went straight to the handler. `validateParams` is now called from the same shared module.
+Then point Claude Desktop, claude.ai/code, or any MCP client at `http://your-tunnel/mcp` with `Authorization: Bearer <token>`. CORS, rate limits, and body caps are on by default. `gbrain auth` is now wired into the main CLI, so it works from the compiled binary the same as `gbrain doctor` or `gbrain serve`.
 
 ### For contributors
 
-- `src/mcp/dispatch.ts` (new) — shared `dispatchToolCall(engine, name, params, opts)` consumed by both stdio (`server.ts`) and HTTP (`http-transport.ts`). One source of truth, harder for transports to drift apart.
+- `src/mcp/dispatch.ts` (new) — shared `dispatchToolCall(engine, name, params, opts)` consumed by both stdio (`server.ts`) and HTTP (`http-transport.ts`). One source of truth for `validateParams`, `OperationContext` construction, and handler invocation, so the two transports can't drift apart.
 - `src/mcp/rate-limit.ts` (new) — bounded-LRU token-bucket. Tracks `lastTouchedMs` separately from `lastRefillMs` so an exhausted key can't be reset by hammering past the TTL.
-- `src/mcp/http-transport.ts` — rewritten on top of the new dispatch + rate-limit modules. Replaces the original `text/event-stream` shape with `application/json` (gbrain MCP tools don't stream; SSE was unnecessary infrastructure cost).
-- 23 unit cases in `test/http-transport.test.ts`, 8 E2E cases in `test/e2e/http-transport.test.ts`. The unit suite covers the F1+F2+F3 dispatch round-trip with a real operation. E2E covers `last_used_at` debounce against real Postgres semantics.
+- `src/mcp/http-transport.ts` — built on the new dispatch + rate-limit modules. `application/json` response shape (gbrain MCP tools are synchronous; the Streamable HTTP transport spec allows JSON for non-streaming responses).
+- `src/cli.ts` + `src/commands/auth.ts` — `auth` is now a wired CLI subcommand. Direct-script usage (`bun run src/commands/auth.ts ...`) still works for environments without a compiled binary.
+- 23 unit cases in `test/http-transport.test.ts`, 8 E2E cases in `test/e2e/http-transport.test.ts`. Unit covers the full dispatch round-trip with a real operation; E2E covers `last_used_at` debounce against real Postgres semantics.
 
 ### Known limits
 
@@ -57,13 +50,13 @@ While ripping the transport out and rebuilding it, three pre-existing bugs in th
 ### Itemized changes
 
 - New: `gbrain serve --http [--port N]` ships the built-in HTTP transport
-- New: SECURITY.md documents the disclosure path and remote-MCP guidance
+- New: `gbrain auth create/list/revoke/test` wired into the main CLI (was a standalone script)
+- New: SECURITY.md documents the disclosure path, the recommended remote-MCP setup, and the full hardening reference
 - New: `src/mcp/dispatch.ts` — shared dispatch path for stdio + HTTP
 - New: `src/mcp/rate-limit.ts` — bounded-LRU token-bucket limiter
-- Fix: handler argument order, OperationContext shape, and param validation drift between transports (caught by codex outside-voice review during planning)
-- Hardening: CORS default-deny, two-bucket rate limit (per-IP pre-auth + per-token post-auth), 1 MiB body cap with stream-counted enforcement, mcp_request_log per-request audit, last_used_at SQL-level debounce
+- Hardening: CORS default-deny, two-bucket rate limit (per-IP pre-auth + per-token post-auth), 1 MiB body cap with stream-counted enforcement, `mcp_request_log` per-request audit, `last_used_at` SQL-level debounce
 - Tests: 23 unit + 8 E2E covering auth, dispatch, CORS, body cap, rate limit, and audit
-- Docs: SECURITY.md + DEPLOY.md updated to recommend `--http` and document the env vars
+- Docs: SECURITY.md, DEPLOY.md, and per-client setup guides updated to recommend `--http` and document the env vars
 
 ## To take advantage of v0.22.7
 
