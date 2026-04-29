@@ -1,8 +1,17 @@
 # Deploy GBrain Remote MCP Server
 
+> **v0.26.0+:** `gbrain serve --http` ships full OAuth 2.1 (client credentials,
+> auth code + PKCE, refresh rotation, optional DCR), an embedded React admin
+> dashboard at `/admin`, scoped operations, and a live SSE activity feed.
+> Pre-v0.26 legacy bearer tokens still work — `verifyAccessToken` falls back
+> to the `access_tokens` table and grandfathers tokens to `read+write+admin`.
+> Postgres-only for the legacy fallback (the `access_tokens` table is Postgres-only);
+> OAuth tables work on both PGLite and Postgres. See [SECURITY.md](../../SECURITY.md)
+> for env vars and tunable defaults.
+
 Access your brain from any device, any AI client. GBrain ships two transports:
-`gbrain serve` (stdio) for local agents, and `gbrain serve --http` (v0.26.0) for
-remote clients over OAuth 2.1.
+`gbrain serve` (stdio) for local agents, and `gbrain serve --http` (v0.26.0+)
+for remote clients over OAuth 2.1.
 
 ## Three Paths
 
@@ -13,19 +22,22 @@ gbrain serve
 ```
 
 Works with Claude Code, Cursor, Windsurf, and any MCP client that supports stdio.
-No server, no tunnel, no token needed.
+No server, no tunnel, no token needed. Works on both PGLite and Postgres engines.
 
 ### Remote over OAuth 2.1 (recommended, v0.26.0+)
 
 ```bash
 gbrain serve --http --port 3131
 ngrok http 3131 --url your-brain.ngrok.app
+gbrain serve --http --port 3131 --public-url https://your-brain.ngrok.app
 ```
 
 Built-in HTTP transport with OAuth 2.1, scoped operations, an admin dashboard
 at `/admin`, and a live SSE activity feed. Zero external dependencies. This is
 the only path that works with ChatGPT (OAuth 2.1 + PKCE is required by the
-ChatGPT MCP connector).
+ChatGPT MCP connector). Pass `--public-url` whenever the server is reachable
+at anything other than `http://localhost:<port>` so the OAuth issuer in
+discovery metadata matches what clients hit (RFC 8414 §3.3).
 
 Supported clients:
 - **ChatGPT** — requires OAuth 2.1 + PKCE. Works natively with `--http`.
@@ -35,19 +47,21 @@ Supported clients:
 
 See the [OAuth 2.1 setup](#oauth-21-setup-v100) section below.
 
-### Remote with legacy bearer tokens (pre-v0.26 deployments)
+### Remote with legacy bearer tokens (pre-v0.26 deployments) — Postgres only
 
 ```
 Your AI client (Claude Desktop, Perplexity, etc.)
   → ngrok tunnel (https://YOUR-DOMAIN.ngrok.app)
-  → Your HTTP server (wraps gbrain serve)
-  → Supabase Postgres (via pooler connection string)
+  → gbrain serve --http  (built-in transport with bearer auth)
+  → Postgres (pooler connection or self-hosted)
 ```
 
 This requires:
-1. A machine running `gbrain serve` behind an HTTP wrapper
-2. A public tunnel (ngrok, Tailscale, or cloud host)
-3. Bearer token auth for security
+1. A Postgres-backed brain (the `access_tokens` table only exists on Postgres;
+   running `gbrain serve --http` against a PGLite install fails fast at startup)
+2. A machine running `gbrain serve --http`
+3. A public tunnel (ngrok, Tailscale, or cloud host)
+4. A bearer token created via `gbrain auth create <name>`
 
 Pre-v1.0 tokens are grandfathered as `read+write+admin` scopes when you upgrade
 to the HTTP server, so no migration is required.
@@ -153,13 +167,13 @@ ngrok http 8787 --url your-brain.ngrok.app  # Hobby tier for fixed domain
 
 ```bash
 # Create a token for each client
-bun run src/commands/auth.ts create "claude-desktop"
+gbrain auth create "claude-desktop"
 
 # List all tokens
-bun run src/commands/auth.ts list
+gbrain auth list
 
 # Revoke a token
-bun run src/commands/auth.ts revoke "claude-desktop"
+gbrain auth revoke "claude-desktop"
 ```
 
 Tokens are per-client. Create one for each device/app. Revoke individually
@@ -176,7 +190,7 @@ if compromised. Tokens are stored SHA-256 hashed in your database.
 ### 4. Verify
 
 ```bash
-bun run src/commands/auth.ts test \
+gbrain auth test \
   https://YOUR-DOMAIN.ngrok.app/mcp \
   --token YOUR_TOKEN
 ```
@@ -204,7 +218,7 @@ Funnel, and cloud hosts (Fly.io, Railway).
 Include the Authorization header: `Authorization: Bearer YOUR_TOKEN`
 
 **"invalid_token" error**
-Run `bun run src/commands/auth.ts list` to see active tokens.
+Run `gbrain auth list` to see active tokens.
 
 **"service_unavailable" error**
 Database connection failed. Check your Supabase dashboard for outages.

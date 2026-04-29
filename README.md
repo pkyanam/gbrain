@@ -88,21 +88,25 @@ gbrain serve --http --port 3131
 # Open the admin dashboard, paste the bootstrap token, register a client
 open http://localhost:3131/admin
 
-# Expose publicly (for remote clients)
+# Expose publicly (set --public-url so the OAuth issuer matches)
 ngrok http 3131 --url your-brain.ngrok.app
+gbrain serve --http --port 3131 --public-url https://your-brain.ngrok.app
+
+# ChatGPT and other OAuth-aware clients can also connect:
+claude mcp add gbrain -t http https://your-brain.ngrok.app/mcp -H "Authorization: Bearer TOKEN"
 ```
 
 Register OAuth clients from the `/admin` dashboard — click **Register client**,
 pick scopes, save the credentials shown once in the reveal modal. Programmatic
-registration via `oauthProvider.registerClientManual(...)` is also available
-for host repos that wrap the server.
+registration via `oauthProvider.registerClientManual(...)` and the
+`gbrain auth register-client` CLI are also available.
 
-- **OAuth 2.1 via the MCP SDK** — client credentials (machine-to-machine: Perplexity, Claude), authorization code + PKCE (browser-based: ChatGPT), refresh token rotation, revocation, protected resource metadata. Optional Dynamic Client Registration behind `--enable-dcr`.
+- **OAuth 2.1 via the MCP SDK** — client credentials (machine-to-machine: Perplexity, Claude), authorization code + PKCE (browser-based: ChatGPT), refresh token rotation, revocation, protected resource metadata. Optional Dynamic Client Registration behind `--enable-dcr` (DCR redirect_uris must be `https://` or loopback per RFC 6749 §3.1.2.1).
 - **Scoped operations** — 30 operations tagged `read | write | admin`. `sync_brain` and `file_upload` are `localOnly`, rejected over HTTP.
 - **React admin dashboard** — 7 screens baked into the binary (~65KB gzip). Live SSE activity feed, agents table, credential reveal, filterable request log, per-client config export.
-- **Legacy bearer tokens still work** — pre-v0.26 `gbrain auth create` tokens continue to authenticate as `read+write+admin`.
+- **Legacy bearer tokens still work** — pre-v0.26 `gbrain auth create` tokens continue to authenticate as `read+write+admin`. v0.22.7's simpler `src/mcp/http-transport.ts` path stays compiled in for backward compat callers; v0.26+ deployments use the OAuth-aware `serve-http.ts`.
 
-Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md).
+Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md). Hardening defaults, env vars, and threat model: [SECURITY.md](SECURITY.md).
 
 ### Using gbrain with GStack
 
@@ -522,6 +526,8 @@ Question
   │    ├─ Multi-query expansion (Haiku rephrases the question 3 ways)
   │    ├─ Vector search (HNSW cosine over OpenAI embeddings)
   │    ├─ Keyword search (Postgres tsvector + websearch_to_tsquery)
+  │    ├─ Source-aware ranking (curated dirs outrank chat/daily swamp at SQL layer)
+  │    ├─ Hard-exclude (test/ archive/ attachments/ .raw/ filtered before retrieval)
   │    ├─ Reciprocal Rank Fusion (score = sum 1/(60+rank) across both)
   │    ├─ Cosine re-scoring (re-rank chunks against actual query embedding)
   │    ├─ Compiled-truth boost (assessments outrank timeline noise)
@@ -674,6 +680,7 @@ ADMIN
   gbrain serve                          MCP server (stdio)
   gbrain serve --http [--port 3131]     HTTP MCP server with OAuth 2.1 + admin dashboard
                                         [--token-ttl 3600] [--enable-dcr]
+                                        [--public-url URL]
   gbrain auth create|list|revoke|test   Legacy bearer token management
   gbrain auth register-client <name>    Register an OAuth 2.1 client
         --grant-types client_credentials,authorization_code
