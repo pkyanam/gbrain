@@ -315,8 +315,15 @@ HANDLER TYPES (built in)
 
       if (follow) {
         console.log(`Job #${job.id} submitted (${name}). Executing inline...`);
-        // Inline execution: run the job in this process
-        const worker = new MinionWorker(engine, { queue: queueName, pollInterval: 100 });
+        // Inline execution: run the job in this process. Disable the
+        // self-health-check timer — inline flows are one-shot and don't have
+        // a process manager to restart them. With the timer enabled and no
+        // 'unhealthy' listener, a DB blip would trip emitUnhealthy's
+        // no-listener fallback and call process.exit(1) from inside the
+        // library, killing the user's CLI session.
+        const worker = new MinionWorker(engine, {
+          queue: queueName, pollInterval: 100, healthCheckInterval: 0,
+        });
 
         // Register built-in handlers
         await registerBuiltinHandlers(worker, engine);
@@ -490,7 +497,11 @@ HANDLER TYPES (built in)
       const sigkillRescue = hasFlag(args, '--sigkill-rescue');
       const wedgeRescue = hasFlag(args, '--wedge-rescue');
 
-      const worker = new MinionWorker(engine, { queue: 'smoke', pollInterval: 100 });
+      // Smoke harness is short-lived and has no listener — disable the health
+      // timer so the no-listener fallback can't trip process.exit(1) mid-test.
+      const worker = new MinionWorker(engine, {
+        queue: 'smoke', pollInterval: 100, healthCheckInterval: 0,
+      });
       worker.register('noop', async () => ({ ok: true, at: new Date().toISOString() }));
 
       const job = await queue.add('noop', {}, { queue: 'smoke', max_attempts: 1 });
@@ -645,11 +656,29 @@ HANDLER TYPES (built in)
       const maxRssExplicit = parseMaxRssFlag(args);
       const maxRssMb = maxRssExplicit ?? 2048;
 
-      // --health-interval: self-health-check period. 0 disables. Default: 60s.
+      // --health-interval: self-health-check period in ms. 0 disables. Default: 60_000 (60s).
       // Provides DB liveness probes + stall detection for bare workers.
       // Automatically skipped when running under a supervisor (GBRAIN_SUPERVISED=1).
+      // Validated aggressively (parity with --max-rss): reject NaN/negative/non-integer
+      // values, and reject suspicious sub-1000ms values that are likely a unit-confusion
+      // typo (e.g. "--health-interval 60" thinking the unit is seconds).
       const healthRaw = parseFlag(args, '--health-interval');
-      const healthCheckInterval = healthRaw !== undefined ? parseInt(healthRaw, 10) : 60_000;
+      let healthCheckInterval = 60_000;
+      if (healthRaw !== undefined) {
+        const parsed = parseInt(healthRaw, 10);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          console.error(`Error: --health-interval must be a non-negative integer (ms), got "${healthRaw}"`);
+          process.exit(1);
+        }
+        if (parsed > 0 && parsed < 1000) {
+          console.error(
+            `Error: --health-interval ${parsed} is suspiciously low (likely a unit-confusion typo). ` +
+            `The flag takes milliseconds; for 60-second probes pass 60000. Use 0 to disable.`,
+          );
+          process.exit(1);
+        }
+        healthCheckInterval = parsed;
+      }
 
       try { await queue.ensureSchema(); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
@@ -659,7 +688,26 @@ HANDLER TYPES (built in)
       });
       await registerBuiltinHandlers(worker, engine);
 
-      const isSupervisedChild = !!process.env.GBRAIN_SUPERVISED;
+      // Subscribe to self-health failures emitted by the worker. Library code
+      // (worker.ts) never calls process.exit directly so it stays embeddable;
+      // this CLI layer is the right place to terminate the process and let
+      // the external PM (systemd, Docker, cron watchdog) restart cleanly.
+      worker.on('unhealthy', (info) => {
+        if (info.reason === 'db_dead') {
+          console.error(
+            `[health] FATAL: DB unreachable after ${info.consecutiveFailures} probes (${info.message}). ` +
+            `Exiting for process-manager restart.`,
+          );
+        } else {
+          console.error(
+            `[health] FATAL: Worker stalled — ${info.waitingCount} waiting job(s) for ` +
+            `registered handlers, ${info.idleMinutes}m idle. Exiting for process-manager restart.`,
+          );
+        }
+        process.exit(1);
+      });
+
+      const isSupervisedChild = process.env.GBRAIN_SUPERVISED === '1';
       const watchdogNote = maxRssMb > 0 ? `, watchdog: ${maxRssMb}MB` : '';
       const healthNote = !isSupervisedChild && healthCheckInterval > 0
         ? `, health-check: ${Math.round(healthCheckInterval / 1000)}s`
@@ -801,7 +849,26 @@ HANDLER TYPES (built in)
       const concurrency = parseInt(parseFlag(args, '--concurrency') ?? '2', 10);
       const queueName = parseFlag(args, '--queue') ?? 'default';
       const maxCrashes = parseInt(parseFlag(args, '--max-crashes') ?? '10', 10);
-      const healthInterval = parseInt(parseFlag(args, '--health-interval') ?? '60000', 10);
+      // --health-interval (supervisor): validate same as `jobs work` so NaN /
+      // negative / sub-1000ms typos fail-fast instead of silently disabling
+      // the supervisor's own health probe.
+      const supHealthRaw = parseFlag(args, '--health-interval');
+      let healthInterval = 60_000;
+      if (supHealthRaw !== undefined) {
+        const parsed = parseInt(supHealthRaw, 10);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          console.error(`Error: --health-interval must be a non-negative integer (ms), got "${supHealthRaw}"`);
+          process.exit(1);
+        }
+        if (parsed > 0 && parsed < 1000) {
+          console.error(
+            `Error: --health-interval ${parsed} is suspiciously low (likely a unit-confusion typo). ` +
+            `The flag takes milliseconds; for 60-second probes pass 60000. Use 0 to disable.`,
+          );
+          process.exit(1);
+        }
+        healthInterval = parsed;
+      }
       const allowShellJobs = hasFlag(args, '--allow-shell-jobs') ||
                              !!process.env.GBRAIN_ALLOW_SHELL_JOBS;
       const detach = hasFlag(args, '--detach');
