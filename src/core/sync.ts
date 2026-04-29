@@ -321,20 +321,50 @@ export interface SyncFailure {
  * message. Matches known ParseValidationCode patterns (SLUG_MISMATCH,
  * YAML_PARSE, etc.) and common DB / timeout errors. Returns 'UNKNOWN'
  * when no pattern matches.
+ *
+ * Order matters: DB-layer errors are checked BEFORE YAML-layer ones so
+ * Postgres `duplicate key value violates unique constraint` doesn't get
+ * mislabeled as a YAML duplicate-key. Frontmatter patterns key off the
+ * canonical messages emitted by `collectValidationErrors()` in markdown.ts.
  */
 export function classifyErrorCode(errorMsg: string): string {
+  // SLUG_MISMATCH: thrown by importFromFile() at src/core/import-file.ts:374.
   if (/slug.*does not match|SLUG_MISMATCH/i.test(errorMsg)) return 'SLUG_MISMATCH';
-  if (/YAML parse|yaml.*parse|YAML_PARSE/i.test(errorMsg)) return 'YAML_PARSE';
-  if (/MISSING_OPEN|missing.*open|frontmatter.*must start|expected frontmatter starting/i.test(errorMsg)) return 'MISSING_OPEN';
-  if (/MISSING_CLOSE|missing.*close|no closing ---|inside frontmatter zone/i.test(errorMsg)) return 'MISSING_CLOSE';
-  if (/NULL_BYTES|null.*byte/i.test(errorMsg)) return 'NULL_BYTES';
-  if (/NESTED_QUOTES|nested.*quote/i.test(errorMsg)) return 'NESTED_QUOTES';
-  if (/EMPTY_FRONTMATTER|empty.*frontmatter|frontmatter block is empty/i.test(errorMsg)) return 'EMPTY_FRONTMATTER';
-  if (/duplicate.*key/i.test(errorMsg)) return 'YAML_DUPLICATE_KEY';
-  if (/statement.*timeout/i.test(errorMsg)) return 'STATEMENT_TIMEOUT';
-  if (/invalid.*utf/i.test(errorMsg)) return 'INVALID_UTF8';
-  if (/file too large|content too large/i.test(errorMsg)) return 'FILE_TOO_LARGE';
-  if (/skipping symlink|symlink/i.test(errorMsg)) return 'SYMLINK_NOT_ALLOWED';
+
+  // DB-layer errors come BEFORE the YAML duplicate-key check. Postgres unique-
+  // constraint violations contain "duplicate key" but are not a YAML problem.
+  if (/duplicate key value violates unique constraint|DB_DUPLICATE_KEY/i.test(errorMsg)) {
+    return 'DB_DUPLICATE_KEY';
+  }
+  if (/canceling statement due to statement timeout|STATEMENT_TIMEOUT/i.test(errorMsg)) {
+    return 'STATEMENT_TIMEOUT';
+  }
+
+  // YAML / frontmatter patterns. These match either the canonical message
+  // strings in src/core/markdown.ts (collectValidationErrors) or the literal
+  // ParseValidationCode token, so they fire whether the caller stores the
+  // message or just the code.
+  if (/YAML parse failed|YAML_PARSE/i.test(errorMsg)) return 'YAML_PARSE';
+  if (/YAMLException|duplicated mapping key|YAML_DUPLICATE_KEY/i.test(errorMsg)) {
+    return 'YAML_DUPLICATE_KEY';
+  }
+  if (/File is empty or whitespace-only|Frontmatter must start with ---|MISSING_OPEN/i.test(errorMsg)) {
+    return 'MISSING_OPEN';
+  }
+  if (/No closing --- delimiter|Heading at line .* found inside frontmatter|MISSING_CLOSE/i.test(errorMsg)) {
+    return 'MISSING_CLOSE';
+  }
+  if (/Frontmatter block is empty|EMPTY_FRONTMATTER/i.test(errorMsg)) return 'EMPTY_FRONTMATTER';
+  if (/Content contains null bytes|NULL_BYTES|null byte/i.test(errorMsg)) return 'NULL_BYTES';
+  if (/Nested double quotes|NESTED_QUOTES/i.test(errorMsg)) return 'NESTED_QUOTES';
+
+  // Generic fallbacks.
+  if (/invalid UTF-?8|INVALID_UTF8/i.test(errorMsg)) return 'INVALID_UTF8';
+
+  // v0.22.12 additions: covers the four real production sites in src/core/import-file.ts
+  // (lines 199, 347, 352, 401) that previously bucketed to UNKNOWN.
+  if (/file too large|content too large|FILE_TOO_LARGE/i.test(errorMsg)) return 'FILE_TOO_LARGE';
+  if (/skipping symlink|symlink|SYMLINK_NOT_ALLOWED/i.test(errorMsg)) return 'SYMLINK_NOT_ALLOWED';
   return 'UNKNOWN';
 }
 
@@ -350,6 +380,25 @@ export function summarizeFailuresByCode(
   return Object.entries(counts)
     .sort(([, a], [, b]) => b - a)
     .map(([code, count]) => ({ code, count }));
+}
+
+/**
+ * Format a code-grouped summary as a human-readable multi-line string for
+ * stderr / doctor output. Accepts either raw failures (which are summarized
+ * internally) or an already-summarized `{code, count}[]` shape (the return
+ * value of `summarizeFailuresByCode` or `AcknowledgeResult.summary`).
+ * Returns an empty string when the input is empty.
+ */
+export function formatCodeBreakdown(
+  input: Array<{ error: string; code?: string }> | Array<{ code: string; count: number }>,
+): string {
+  // Distinguish by shape: summary entries have a numeric `count`. Empty array
+  // returns '' from either branch — both paths produce a 0-length join.
+  const summary =
+    input.length > 0 && typeof (input[0] as { count?: unknown }).count === 'number'
+      ? (input as Array<{ code: string; count: number }>)
+      : summarizeFailuresByCode(input as Array<{ error: string; code?: string }>);
+  return summary.map(s => `  ${s.code}: ${s.count}`).join('\n');
 }
 
 function _failuresDir(): string {

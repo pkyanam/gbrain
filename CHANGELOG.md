@@ -4,94 +4,122 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.22.12] - 2026-04-29
 
-**`sync --skip-failed` no longer hides systemic failures behind a single number.**
-**You see the breakdown by error code at the moment of the skip, not three weeks later.**
+**`sync --skip-failed` now classifies file-size and symlink rejections instead of bucketing them as UNKNOWN.**
+**Plus a full end-to-end test for the failure loop.**
 
-The driver: a real 81K-page brain ran `gbrain sync --skip-failed` and acknowledged
-2,688 failures with the message `Acknowledged 2688 failure(s) and advancing past
-them.` The bookmark advanced. Sync moved on. What that single line hid was that
-2,685 of those failures were the same root cause (`SLUG_MISMATCH` on posterous
-imports). The operator only found out by manually grepping `~/.gbrain/sync-failures.jsonl`
-weeks later.
+v0.22.9 shipped the headline classifier work: code-grouped breakdowns at sync time,
+DB-vs-YAML disambiguation, doctor surfaces both unacked and historical entries with
+`[CODE=N]` lines. v0.22.12 closes the last two coverage gaps that v0.22.9 left on
+the table:
 
-Now the same operation prints:
+- **FILE_TOO_LARGE** now covers the three real production sites in
+  `src/core/import-file.ts:199, 352, 401` ("Content too large", "File too large",
+  "Code file too large"). On v0.22.9 these all bucketed as UNKNOWN — the same
+  silent-systemic-failure pattern that motivated the original issue.
+- **SYMLINK_NOT_ALLOWED** covers `src/core/import-file.ts:347` ("Skipping symlink").
+  Security-relevant rejection that operators should see.
+- **End-to-end failure-loop test** in `test/e2e/sync.test.ts` exercises the full
+  chain: broken file → sync blocks with grouped breakdown → `--skip-failed`
+  advances bookmark with grouped acknowledgement → second broken file → second
+  cycle. PostgreSQL-backed; verifies bookmark gating, JSONL state, dedup, and
+  summary aggregation. v0.22.9's coverage was unit-tests-only.
 
-```
-Acknowledged 2688 failure(s) and advancing past them:
-  SLUG_MISMATCH: 2685
-  YAML_PARSE: 3
-```
-
-The block-without-skip path shows the same breakdown before you even type
-`--skip-failed`, so you can decide whether to fix the files or skip them with
-the systemic root cause already visible. `gbrain doctor`'s `sync_failures` check
-shows the same breakdown for both unacked and historical entries.
-
-Twelve error codes ship: `SLUG_MISMATCH`, `YAML_PARSE`, `YAML_DUPLICATE_KEY`,
-`MISSING_OPEN`, `MISSING_CLOSE`, `NESTED_QUOTES`, `EMPTY_FRONTMATTER`, `NULL_BYTES`,
-`INVALID_UTF8`, `STATEMENT_TIMEOUT`, `FILE_TOO_LARGE`, `SYMLINK_NOT_ALLOWED`. Anything
-the regex set doesn't recognize falls through as `UNKNOWN`. Backward-compatible —
-pre-v0.22.12 entries get classified at acknowledge time.
-
-### The numbers that matter
-
-Source: a real production brain that hit 2,688 sync failures in one run.
-
-| Metric | Before | After |
-|---|---|---|
-| Operator-visible signal at skip time | "2688 failure(s)" | code-grouped breakdown |
-| Time to root cause for a systemic class | manual JSONL grep, ~hours | immediate, visible at skip |
-| Codes recognized | 0 | 12 |
-| `gbrain doctor` surfaces unacked breakdown | no | yes |
-| `gbrain doctor` surfaces historical breakdown | no | yes |
-| Test coverage | unit only | unit + E2E full loop |
+Twelve total error codes ship in the classifier:
+`SLUG_MISMATCH`, `YAML_PARSE`, `YAML_DUPLICATE_KEY`, `DB_DUPLICATE_KEY`,
+`MISSING_OPEN`, `MISSING_CLOSE`, `NESTED_QUOTES`, `EMPTY_FRONTMATTER`,
+`NULL_BYTES`, `INVALID_UTF8`, `STATEMENT_TIMEOUT`, `FILE_TOO_LARGE`,
+`SYMLINK_NOT_ALLOWED`. Anything the regex set doesn't recognize falls through
+as `UNKNOWN`.
 
 ### What this means for you
 
-If you ever run `gbrain sync --skip-failed`, you now see what's in the bucket
-before you skip it. If a doctor-detected systemic failure mode shows up
-(`SLUG_MISMATCH=2685`), `gbrain frontmatter audit --fix` is the natural next
-step before you skip thousands of files. The breakdown also surfaces in the
-`blocked_by_failures` print path, so you can fix without skipping if the count
-is small.
-
-Run `gbrain upgrade`. No manual user action required — new classifier codes
-apply on next sync.
+If your brain rejects oversized files or symlinks, you now see those rejections
+in the doctor breakdown and at sync time grouped by code, instead of as
+`UNKNOWN`. Run `gbrain upgrade`. No manual action required.
 
 ### Itemized changes
 
 #### Added
-- `classifyErrorCode(errorMsg)` regex-based classifier in `src/core/sync.ts`. 12 codes plus `UNKNOWN` fallback. Pure function, fully unit tested.
-- `summarizeFailuresByCode(failures)` returns sorted `Array<{code, count}>` for both unacked and acked entries. Pure function.
-- `code` field on `SyncFailure` interface. Backfilled at acknowledge time for entries that predate v0.22.12.
-- `acknowledgeSyncFailures()` now returns `AcknowledgeResult { count, summary }` instead of just a number, so `--skip-failed` can render the breakdown without re-reading the JSONL.
-- `FILE_TOO_LARGE` and `SYMLINK_NOT_ALLOWED` regex coverage for the four real production error sites in `src/core/import-file.ts` (lines 199, 347, 352, 401) that previously bucketed to `UNKNOWN` — exactly the systemic-hidden-as-UNKNOWN pattern that motivated the original issue.
-- Six unit tests pinning the 4 previously-untested codes (`MISSING_OPEN`, `MISSING_CLOSE`, `NESTED_QUOTES`, `EMPTY_FRONTMATTER`) plus the 2 new codes against literal production message strings. Anyone who renames a validator message has to update both sides; the test catches drift loudly.
-- One end-to-end test in `test/e2e/sync.test.ts` exercising the full failure loop: broken file → sync blocks with grouped breakdown → `--skip-failed` advances bookmark with grouped acknowledgement → second broken file → second cycle. PostgreSQL-backed; verifies bookmark gating, JSONL state, dedup, summary aggregation across paths.
-
-#### Changed
-- `gbrain sync` `blocked_by_failures` and `--skip-failed` paths print code-grouped breakdowns (`SLUG_MISMATCH: N`, etc.) on stderr.
-- `gbrain doctor`'s `sync_failures` check shows `[CODE=N, ...]` for both unacked and historical entries.
-- Three existing classifier regexes (`MISSING_OPEN`, `MISSING_CLOSE`, `EMPTY_FRONTMATTER`) broadened to match the actual message strings emitted by `src/core/markdown.ts:159-244`. Previously the regex set only matched the literal code-name prefix, leaving production message strings as `UNKNOWN`.
-
-#### Credits
-- PR #501 by @wintermute (the structured summary, doctor breakdown, 12 unit tests, `code` field, AcknowledgeResult shape) was cherry-picked as the foundation for this release. The v0.22.12 cut adds classifier coverage for file-size and symlink rejections, regex breadth fixes for the 4 markdown validator codes, and the missing E2E loop.
+- `FILE_TOO_LARGE` classifier code covering `src/core/import-file.ts:199, 352, 401`.
+- `SYMLINK_NOT_ALLOWED` classifier code covering `src/core/import-file.ts:347`.
+- Two new unit tests in `test/sync-failures.test.ts` pinning the new codes against
+  literal production message strings (`File too large (N bytes)`, `Skipping symlink: ...`).
+- `test/e2e/sync.test.ts` — new failure-loop test exercising broken-file → block →
+  `--skip-failed` → second cycle. Hermetic on developer machines (saves+restores
+  the user's real `~/.gbrain/sync-failures.jsonl`).
 
 ## To take advantage of v0.22.12
 
-No manual action required. Run `gbrain upgrade`. The new classifier codes apply
-on the next `gbrain sync`. The `gbrain doctor` `sync_failures` check will
-retroactively classify any historical entries on first run — pre-v0.22.12 rows
-without a `code` field get classified at read time and bucketed correctly.
+No manual action required. Run `gbrain upgrade`. The new `FILE_TOO_LARGE` and
+`SYMLINK_NOT_ALLOWED` classifier codes apply on the next `gbrain sync`.
 
-If you have a brain currently wedged with thousands of unacknowledged failures
-and want to see the breakdown before deciding what to do:
+## [0.22.9] - 2026-04-29
 
-```bash
-gbrain doctor --json | jq '.checks[] | select(.name == "sync_failures")'
+**Sync failures now tell you why, not just how many.**
+**`gbrain sync --skip-failed` and `gbrain doctor` group failures by error code, so 2,685 silent SLUG_MISMATCH files don't hide behind a single count.**
+
+Before this release, when sync hit per-file parse errors the only signal was a number:
+
+```
+Sync blocked: 2688 file(s) failed to parse. Fix the YAML frontmatter...
 ```
 
-The `message` field shows the full code breakdown.
+That count is useless when you're staring at 2,688 files and don't know what's wrong. On a real 81K-page brain, 2,685 of those turned out to be `SLUG_MISMATCH` from a posterous import — a single root cause hiding behind a giant number. It took manual `cat ~/.gbrain/sync-failures.jsonl | jq` to figure that out.
+
+After:
+
+```
+Sync blocked: 2688 file(s) failed to parse:
+  SLUG_MISMATCH: 2685
+  YAML_DUPLICATE_KEY: 3
+
+Fix the YAML frontmatter in the files above and re-run, or use 'gbrain sync --skip-failed' to acknowledge and move on.
+
+# gbrain sync --skip-failed
+Acknowledged 2688 failure(s) and advancing past them:
+  SLUG_MISMATCH: 2685
+  YAML_DUPLICATE_KEY: 3
+```
+
+`gbrain doctor` shows the same breakdown for unacknowledged AND historical entries:
+
+```
+[WARN] sync_failures: 2688 unacknowledged sync failure(s) [SLUG_MISMATCH=2685, YAML_DUPLICATE_KEY=3].
+[OK]   sync_failures: 500544 historical sync failure(s), all acknowledged [SLUG_MISMATCH=2685, ...].
+```
+
+The classifier knows the canonical messages from `collectValidationErrors()` in `src/core/markdown.ts` (8 frontmatter codes), Postgres unique-constraint violations (`DB_DUPLICATE_KEY`), statement-timeout errors (`STATEMENT_TIMEOUT`), invalid UTF-8, and YAML duplicates. DB-layer errors check before YAML-layer ones — so a Postgres `duplicate key value violates unique constraint` no longer mislabels as a YAML duplicate. Unrecognized errors fall through to `UNKNOWN`.
+
+### What this means for you
+
+If `gbrain sync` blocks with parse failures, the breakdown tells you what to fix first. SLUG_MISMATCH is one fix-pattern (frontmatter says one slug, path says another); YAML_PARSE is a different one (malformed YAML); STATEMENT_TIMEOUT means a DB timeout, not a parse problem. You stop staring at counts and start fixing root causes.
+
+### For contributors
+
+`acknowledgeSyncFailures()` in `src/core/sync.ts` now returns `{count, summary}` instead of `number`. If you import this directly from `gbrain/sync`, replace `n` with `result.count` and use `result.summary` (an `Array<{code, count}>`) for the new code-grouped breakdown. The function is reachable via the package exports map; this is a deliberate, non-shimmed breaking change. There is a new `formatCodeBreakdown()` helper in the same module that accepts either raw failures or pre-summarized input — use it instead of building breakdown strings inline.
+
+### Itemized changes
+
+#### Added
+
+- `classifyErrorCode(errorMsg)` in `src/core/sync.ts` — best-effort error-code extraction from sync failure messages. Codes: `SLUG_MISMATCH`, `YAML_PARSE`, `YAML_DUPLICATE_KEY`, `MISSING_OPEN`, `MISSING_CLOSE`, `EMPTY_FRONTMATTER`, `NULL_BYTES`, `NESTED_QUOTES`, `DB_DUPLICATE_KEY`, `STATEMENT_TIMEOUT`, `INVALID_UTF8`, `UNKNOWN`.
+- `summarizeFailuresByCode(failures)` — groups failures by code and returns a sorted `Array<{code, count}>`.
+- `formatCodeBreakdown(input)` — renders a multi-line `code: count` string from either raw failures or a pre-computed summary. Single helper, two input shapes.
+- `code?: string` field on the `SyncFailure` JSONL row in `~/.gbrain/sync-failures.jsonl`. Populated at write-time so the classifier runs once per failure, not on every load.
+- `AcknowledgeResult` interface as the new return shape of `acknowledgeSyncFailures()`.
+- 15 new test cases in `test/sync-failures.test.ts`: DB-vs-YAML duplicate-key disambiguation, canonical-message coverage for all 7 frontmatter codes, `acknowledgeSyncFailures()` legacy-entry backfill branch, `formatCodeBreakdown()` dual-input shape.
+
+#### Changed
+
+- `gbrain sync` blocked-message: now lists code breakdown above the fix instructions (both incremental and full-sync paths).
+- `gbrain sync --skip-failed` ack message: now lists what was skipped, grouped by code.
+- `gbrain doctor` `sync_failures` check: warn-and-ok messages both include `[code=count, ...]` breakdown.
+- `recordSyncFailures()` now stores `code` alongside `error` so downstream readers don't re-classify.
+- `acknowledgeSyncFailures()` backfills `code` on legacy rows that predate the field — upgrade-safe for users with existing `~/.gbrain/sync-failures.jsonl`.
+- DB-layer error patterns (`DB_DUPLICATE_KEY`, `STATEMENT_TIMEOUT`) check BEFORE YAML patterns in the classifier, so Postgres errors don't get YAML-labeled.
+- Frontmatter regex patterns rewritten to match canonical messages from `collectValidationErrors()` (`File is empty...`, `No closing --- delimiter found`, `Frontmatter block is empty`) instead of aspirational code-token strings (`missing.*open`) that never appeared in practice.
+
+Closes #500.
 
 ## [0.22.8] - 2026-04-28
 
