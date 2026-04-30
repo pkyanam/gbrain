@@ -54,7 +54,7 @@ describe('splitStatements', () => {
 });
 
 describe('seedPglite', () => {
-  test('replays a SQL dump into a fresh PGLite database', { timeout: 30_000 }, async () => {
+  test('replays a SQL dump into a fresh PGLite database', async () => {
     const dbPath = join(tmp, 'brain.pglite');
     const sql = `
       CREATE TABLE seeded(id INT PRIMARY KEY, name TEXT);
@@ -75,22 +75,22 @@ describe('seedPglite', () => {
     } finally {
       await engine.disconnect();
     }
-  });
+  }, 30_000);
 
-  test('throws with a useful message when SQL is invalid', { timeout: 30_000 }, async () => {
+  test('throws with a useful message when SQL is invalid', async () => {
     const dbPath = join(tmp, 'bad.pglite');
     const sql = 'INVALID SQL HERE;';
     await expect(seedPglite({ dbPath, sql })).rejects.toThrow(/SQL execution failed/);
-  });
+  }, 30_000);
 
-  test('creates parent directories when needed', { timeout: 30_000 }, async () => {
+  test('creates parent directories when needed', async () => {
     const dbPath = join(tmp, 'nested', 'deeper', 'brain.pglite');
     await seedPglite({ dbPath, sql: 'CREATE TABLE x(y int);' });
     // No throw means the dir was created.
     expect(true).toBe(true);
-  });
+  }, 30_000);
 
-  test('empty SQL is a no-op (just creates the .pglite)', { timeout: 30_000 }, async () => {
+  test('empty SQL is a no-op (just creates the .pglite)', async () => {
     const dbPath = join(tmp, 'empty.pglite');
     await seedPglite({ dbPath, sql: '' });
     // Verify the database is openable but empty.
@@ -102,11 +102,11 @@ describe('seedPglite', () => {
     } finally {
       await engine.disconnect();
     }
-  });
+  }, 30_000);
 });
 
 describe('seedPgliteFromFile', () => {
-  test('reads SQL from disk and replays', { timeout: 30_000 }, async () => {
+  test('reads SQL from disk and replays', async () => {
     const sqlPath = join(tmp, 'dump.sql');
     const dbPath = join(tmp, 'brain.pglite');
     writeFileSync(sqlPath, 'CREATE TABLE z(id int); INSERT INTO z VALUES (42);');
@@ -119,7 +119,7 @@ describe('seedPgliteFromFile', () => {
     } finally {
       await engine.disconnect();
     }
-  });
+  }, 30_000);
 
   test('throws on missing SQL file', async () => {
     await expect(seedPgliteFromFile({

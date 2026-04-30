@@ -86,7 +86,7 @@ describe('agent-agnosticism guard', () => {
     class UnavailableRunner implements AgentRunner {
       name = 'gone';
       async detect() { return { available: false, reason: 'not installed' } as DetectResult; }
-      async invoke() { throw new Error('should not be called'); }
+      async invoke(): Promise<InvokeResult> { throw new Error('should not be called'); }
     }
     registerAgentRunner('gone', () => new UnavailableRunner());
     const r = resolveAgentRunner('gone');

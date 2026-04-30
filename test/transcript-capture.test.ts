@@ -136,7 +136,11 @@ describe('spawnWithCapture', () => {
 
   test('timeout fires SIGTERM/SIGKILL', async () => {
     const sink = createTranscriptSink(path);
-    const result = await spawnWithCapture('/bin/sh', ['-c', 'sleep 30'], {
+    // `exec sleep` replaces sh with sleep so the child we spawn IS sleep —
+    // SIGTERM goes directly to it, no shell-vs-child process-group ambiguity.
+    // CI runners are slower than local, so the test cap is 30s with headroom
+    // even if SIGTERM is missed and SIGKILL has to run after the 5s grace.
+    const result = await spawnWithCapture('/bin/sh', ['-c', 'exec sleep 30'], {
       cwd: tmp,
       env: { PATH: process.env.PATH ?? '' },
       timeoutMs: 200,
@@ -145,7 +149,7 @@ describe('spawnWithCapture', () => {
     await sink.close();
     expect(result.timedOut).toBe(true);
     expect(result.exitCode).not.toBe(0);
-  }, 10_000);
+  }, 30_000);
 
   test('rejects when the binary does not exist', async () => {
     const sink = createTranscriptSink(path);
