@@ -225,6 +225,14 @@ if (import.meta.main) {
   }
 
   const changedFiles = readChangedFiles(repoRoot);
+
+  // --classify-only: print EMPTY|DOC_ONLY|SRC + exit. Used by ci-local.sh's
+  // Tier 2 fast-path so doc-only diffs skip the unit phase entirely.
+  if (process.argv.includes("--classify-only")) {
+    process.stdout.write(classify(changedFiles) + "\n");
+    process.exit(0);
+  }
+
   const allE2ETests = listAllE2ETests(repoRoot);
   const tests = selectTests({
     changedFiles,
