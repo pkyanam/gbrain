@@ -1322,7 +1322,7 @@ export class PGLiteEngine implements BrainEngine {
     const result = await this.db.query(
       `INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, superseded_by, active)
        SELECT v.page_id::int, v.row_num::int, v.claim, v.kind, v.holder, v.weight::real,
-              v.since_date::date, v.until_date::date, v.source, v.superseded_by::int, v.active::boolean
+              v.since_date::text, v.until_date::text, v.source, v.superseded_by::int, v.active::boolean
        FROM unnest($1::int[], $2::int[], $3::text[], $4::text[], $5::text[], $6::real[],
                    $7::text[], $8::text[], $9::text[], $10::int[], $11::boolean[])
          AS v(page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, superseded_by, active)
@@ -1480,7 +1480,7 @@ export class PGLiteEngine implements BrainEngine {
     const result = await this.db.query(
       `UPDATE takes SET
          weight     = COALESCE($3::real, weight),
-         since_date = COALESCE($4::date, since_date),
+         since_date = COALESCE($4::text, since_date),
          source     = COALESCE($5::text, source),
          updated_at = now()
        WHERE page_id = $1 AND row_num = $2
@@ -1521,7 +1521,7 @@ export class PGLiteEngine implements BrainEngine {
       const w = Math.max(0, Math.min(1, newRow.weight ?? 0.5));
       await tx.query(
         `INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, active)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8::date, $9, $10)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7::text, $8::text, $9, $10)`,
         [
           pageId, newRowNum, newRow.claim, newRow.kind, newRow.holder, w,
           newRow.since_date ?? null, newRow.until_date ?? null, newRow.source ?? null,

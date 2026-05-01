@@ -168,6 +168,8 @@ export function takeRowToTake(row: Record<string, unknown>): Take {
     if (v instanceof Date) return v.toISOString();
     return String(v);
   };
+  // since/until_date are TEXT (since v0.28 — DATE was too restrictive for
+  // partial dates like '2017-01' that the spec uses).
   const dateOrNull = (v: unknown): string | null => {
     if (v == null) return null;
     if (v instanceof Date) return v.toISOString().slice(0, 10);

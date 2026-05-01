@@ -1372,7 +1372,7 @@ export class PostgresEngine implements BrainEngine {
     const result = await sql`
       INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, superseded_by, active)
       SELECT v.page_id::int, v.row_num::int, v.claim, v.kind, v.holder, v.weight::real,
-             v.since_date::date, v.until_date::date, v.source, v.superseded_by::int, v.active::boolean
+             v.since_date::text, v.until_date::text, v.source, v.superseded_by::int, v.active::boolean
       FROM unnest(
         ${pageIds}::int[], ${rowNums}::int[], ${claims}::text[], ${kinds}::text[],
         ${holders}::text[], ${weights}::real[], ${sinces}::text[], ${untils}::text[],
@@ -1522,7 +1522,7 @@ export class PostgresEngine implements BrainEngine {
     const result = await sql`
       UPDATE takes SET
         weight     = COALESCE(${weight ?? null}::real, weight),
-        since_date = COALESCE(${fields.since_date ?? null}::date, since_date),
+        since_date = COALESCE(${fields.since_date ?? null}::text, since_date),
         source     = COALESCE(${fields.source ?? null}::text, source),
         updated_at = now()
       WHERE page_id = ${pageId} AND row_num = ${rowNum}
@@ -1553,7 +1553,7 @@ export class PostgresEngine implements BrainEngine {
       await tx`
         INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, active)
         VALUES (${pageId}, ${newRowNum}, ${newRow.claim}, ${newRow.kind}, ${newRow.holder}, ${wClamped},
-                ${newRow.since_date ?? null}::date, ${newRow.until_date ?? null}::date,
+                ${newRow.since_date ?? null}::text, ${newRow.until_date ?? null}::text,
                 ${newRow.source ?? null}, ${newRow.active ?? true})
       `;
       await tx`
