@@ -2,34 +2,32 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.23.1] - 2026-04-30
+## [0.23.2] - 2026-04-30
 
-**Dream cycle can't eat its own output. Verdict model is configurable.**
+**The dream cycle now stamps every page it writes. The guard checks for the stamp. No content guessing, no false positives.**
 
-Two fixes for the dream-cycle synthesize phase shipped in v0.23.0.
+The v0.23.1 prefix-string guard had two flaws caught by a codex review of the v0.23.2 plan. Real serialized brain pages do not always contain their own slug in the body. The synth prompt produces `[Alice](people/alice)` references far more often than the page's own slug, and `serializeMarkdown` does not embed the slug anywhere by default. So the heuristic could miss real dream output. And real conversation transcripts often DO mention brain slugs (`"earlier I wrote about wiki/personal/reflections/identity..."`), so the heuristic dropped legitimate transcripts silently.
 
-### Self-consumption guard (built-in, zero config)
+v0.23.2 swaps content inference for explicit identity. Every page the synthesize phase writes now gets `dream_generated: true` stamped into its YAML frontmatter at render time. The self-consumption guard checks for that field. CRLF and BOM tolerated. Whitespace and case variants tolerated. Cannot drift, cannot false-positive on user text, cannot miss real output.
 
-The transcript discovery layer now auto-skips any file whose first 2000 characters contain dream output slug prefixes (`wiki/personal/reflections/`, `wiki/originals/ideas/`, `wiki/personal/patterns/`, `dream-cycle-summaries/`). This prevents the dream cycle from synthesizing its own output if transcripts ever include dream-generated pages — an infinite recursion bug that would compound with each overnight cycle.
+`gbrain dream --unsafe-bypass-dream-guard` is a new explicit escape hatch for power users who really do want to re-process a dream-generated page (rare, mostly testing). A loud stderr warning fires every time it runs. The flag is intentionally NOT tied to `--input` because that would let any caller silently re-trigger the loop bug.
 
-The guard is structural and always-on. User-configured `exclude_patterns` are additive on top. The 2000-char head scan keeps the cost negligible (no full-content scan).
-
-### Configurable verdict model
-
-The significance verdict model (the cheap "is this worth processing?" filter) is now configurable via `dream.synthesize.verdict_model`. Default remains `claude-haiku-4-5-20251001`. Set it if you want a stronger model for the triage pass:
-
-```bash
-gbrain config set dream.synthesize.verdict_model claude-sonnet-4-6
-```
+The configurable verdict model from v0.23.1 stays. `gbrain config set dream.synthesize.verdict_model claude-sonnet-4-6` still works, with new unit-test coverage asserting the override actually reaches `client.create({ model })`.
 
 ### Itemized changes
 
 #### Fixed
-- `src/core/cycle/transcript-discovery.ts`: built-in `isDreamOutput()` guard checks first 2000 chars for dream output slug prefixes. Applied in both `discoverTranscripts()` and `readSingleTranscript()`. Runs before user-configured exclude patterns.
-- `src/core/cycle/synthesize.ts`: `judgeSignificance()` now accepts a `verdictModel` parameter (default `claude-haiku-4-5-20251001`). Loaded from `dream.synthesize.verdict_model` config key via `loadSynthConfig()`.
+- `src/core/cycle/synthesize.ts`: `renderPageToMarkdown` (now exported) stamps `dream_generated: true` and `dream_cycle_date` into every reverse-write. `writeSummaryPage` does the same when building the dream-cycle summary index. The DB-stored frontmatter persists the marker across re-renders.
+- `src/core/cycle/transcript-discovery.ts`: replaces v0.23.1's `DREAM_OUTPUT_SLUGS` content-prefix list with `DREAM_OUTPUT_MARKER_RE`, anchored at frontmatter open with optional BOM and CRLF tolerance. Runs in both `discoverTranscripts` and `readSingleTranscript`. Stderr log fires when the guard skips a file (no more silent skips).
+- `src/core/cycle/synthesize.ts`: `judgeSignificance` and `JudgeClient` are now exported; `judgeSignificance` accepts a `verdictModel` parameter (default `claude-haiku-4-5-20251001`) loaded from `dream.synthesize.verdict_model` via `loadSynthConfig`.
+
+#### Added
+- `gbrain dream --unsafe-bypass-dream-guard` CLI flag. Plumbed through `runCycle.synthBypassDreamGuard` → `SynthesizePhaseOpts.bypassDreamGuard` → `discoverTranscripts({bypassGuard})` and `readSingleTranscript({bypassGuard})`. Fires a loud stderr warning at phase entry when set. Never auto-applied for `--input`.
 
 #### Tests
-- 3 new test cases in `test/cycle-synthesize.test.ts` under `self-consumption guard`: discovery skips dream output files, single-transcript returns null for dream output, deep-buried slugs don't false-positive (performance guard checks head only).
+- 12 new test cases in `test/cycle-synthesize.test.ts`:
+  - `self-consumption guard (v0.23.2 marker-based)`: REGRESSION fixture built from a real `Page → renderPageToMarkdown → isDreamOutput` round-trip; legitimate user note citing a slug is NOT skipped; CRLF + BOM tolerated; whitespace and case variants tolerated; `false`/absent values do NOT match; `dream_generatedfoo` (no word boundary on key) does NOT match; marker buried past 2000 chars does NOT trigger (perf bound); `bypassGuard=true` overrides; `discoverTranscripts` respects the bypass; `DREAM_OUTPUT_MARKER_RE` is anchored at byte 0.
+  - `judgeSignificance`: passes verdict_model override to `client.create`; defaults to `claude-haiku-4-5-20251001` when omitted; returns `worth_processing=false` on unparseable judge output.
 
 ## [0.23.0] - 2026-04-26
 
