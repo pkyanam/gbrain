@@ -1,0 +1,4 @@
+// Routing eval fixtures for skills/voice-note-ingest.
+{"intent":"please voice note for me now","expected_skill":"voice-note-ingest"}
+{"intent":"please ingest this voice memo for me now","expected_skill":"voice-note-ingest"}
+{"intent":"please transcribe and file for me now","expected_skill":"voice-note-ingest"}

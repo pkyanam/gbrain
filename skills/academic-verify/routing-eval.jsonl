@@ -1,0 +1,4 @@
+// Routing eval fixtures for skills/academic-verify.
+{"intent":"please verify this academic claim for me now","expected_skill":"academic-verify"}
+{"intent":"please check this study for me now","expected_skill":"academic-verify"}
+{"intent":"please academic verify for me now","expected_skill":"academic-verify"}

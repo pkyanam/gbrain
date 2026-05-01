@@ -1,0 +1,4 @@
+// Routing eval fixtures for skills/article-enrichment.
+{"intent":"please enrich this article for me now","expected_skill":"article-enrichment"}
+{"intent":"please enrich brain pages for me now","expected_skill":"article-enrichment"}
+{"intent":"please batch enrich for me now","expected_skill":"article-enrichment"}

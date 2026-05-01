@@ -1,0 +1,4 @@
+// Routing eval fixtures for skills/perplexity-research.
+{"intent":"please perplexity research for me now","expected_skill":"perplexity-research"}
+{"intent":"please what's new about for me now","expected_skill":"perplexity-research"}
+{"intent":"please current state of for me now","expected_skill":"perplexity-research"}

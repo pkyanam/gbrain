@@ -1,0 +1,4 @@
+// Routing eval fixtures for skills/concept-synthesis.
+{"intent":"please concept synthesis for me now","expected_skill":"concept-synthesis"}
+{"intent":"please synthesize my concepts for me now","expected_skill":"concept-synthesis"}
+{"intent":"please find patterns across my notes for me now","expected_skill":"concept-synthesis"}

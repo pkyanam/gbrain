@@ -1,0 +1,4 @@
+// Routing eval fixtures for skills/strategic-reading.
+{"intent":"please strategic reading for me now","expected_skill":"strategic-reading"}
+{"intent":"please read this through the lens of for me now","expected_skill":"strategic-reading"}
+{"intent":"please apply this to my problem for me now","expected_skill":"strategic-reading"}

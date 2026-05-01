@@ -1,0 +1,4 @@
+// Routing eval fixtures for skills/book-mirror.
+{"intent":"please personalized version of this book for me now","expected_skill":"book-mirror"}
+{"intent":"please mirror this book for me now","expected_skill":"book-mirror"}
+{"intent":"please two-column book analysis for me now","expected_skill":"book-mirror"}

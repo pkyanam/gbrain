@@ -1,0 +1,4 @@
+// Routing eval fixtures for skills/brain-pdf.
+{"intent":"please make pdf from brain for me now","expected_skill":"brain-pdf"}
+{"intent":"please brain pdf for me now","expected_skill":"brain-pdf"}
+{"intent":"please convert brain page to pdf for me now","expected_skill":"brain-pdf"}
