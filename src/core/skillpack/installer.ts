@@ -739,36 +739,63 @@ export function applyUninstall(opts: UninstallOptions): UninstallResult {
       );
     }
 
-    // ── Step 4 + 5: D11 content-hash + remove ─────────────────────
-    const files: UninstallFileResult[] = [];
+    // ── Step 4: D11 content-hash pre-scan ─────────────────────────
+    // Atomic refusal contract: do NOT unlink ANY file until we've
+    // confirmed every file is removable. Otherwise a divergence on
+    // file 5/N would leave files 1..4 already gone — half-uninstalled.
+    const fileChecks: Array<{
+      entry: BundleEntry;
+      target: string;
+      kind: 'identical' | 'modified' | 'absent';
+    }> = [];
     const blockedByLocalMod: string[] = [];
+
     for (const entry of entries) {
       const target = join(opts.targetSkillsDir, entry.relTarget);
-      let outcome: UninstallFileOutcome;
       if (!existsSync(target)) {
+        fileChecks.push({ entry, target, kind: 'absent' });
+        continue;
+      }
+      let identical = false;
+      try {
+        const a = readFileSync(entry.source);
+        const b = readFileSync(target);
+        identical = a.equals(b);
+      } catch {
+        identical = false;
+      }
+      if (identical) {
+        fileChecks.push({ entry, target, kind: 'identical' });
+      } else {
+        fileChecks.push({ entry, target, kind: 'modified' });
+        if (!opts.overwriteLocal) blockedByLocalMod.push(target);
+      }
+    }
+
+    // Refuse loudly BEFORE any filesystem mutation if anything blocked.
+    if (blockedByLocalMod.length > 0) {
+      throw new UninstallError(
+        `Refusing to uninstall '${opts.skillSlug}': ${blockedByLocalMod.length} file(s) differ from the bundle (you've hand-edited them):\n  ${blockedByLocalMod.join('\n  ')}\n\nPass --overwrite-local to drop your edits, or run \`gbrain skillpack diff ${opts.skillSlug}\` to inspect first.`,
+        'locally_modified',
+      );
+    }
+
+    // ── Step 5: remove (now safe; nothing blocked or all overridden) ──
+    const files: UninstallFileResult[] = [];
+    for (const { entry, target, kind } of fileChecks) {
+      let outcome: UninstallFileOutcome;
+      if (kind === 'absent') {
         outcome = 'absent';
       } else {
-        let identical = false;
-        try {
-          const a = readFileSync(entry.source);
-          const b = readFileSync(target);
-          identical = a.equals(b);
-        } catch {
-          identical = false;
-        }
-        if (identical || opts.overwriteLocal) {
-          outcome = 'removed';
-          if (!opts.dryRun) {
-            try {
-              unlinkSync(target);
-            } catch {
-              // file vanished between check and unlink — treat as already-gone
-              outcome = 'absent';
-            }
+        // Either identical (safe to remove) or modified-with-overwrite-local.
+        outcome = 'removed';
+        if (!opts.dryRun) {
+          try {
+            unlinkSync(target);
+          } catch {
+            // File vanished between check and unlink — treat as already-gone.
+            outcome = 'absent';
           }
-        } else {
-          outcome = 'kept_locally_modified';
-          blockedByLocalMod.push(target);
         }
       }
       files.push({
@@ -777,18 +804,6 @@ export function applyUninstall(opts: UninstallOptions): UninstallResult {
         outcome,
         sharedDep: entry.sharedDep,
       });
-    }
-
-    // If ANY file was kept due to local-mod and the user did NOT pass
-    // --overwrite-local, refuse the whole uninstall. We do NOT want to
-    // half-uninstall: that leaves the managed-block out of sync with
-    // the filesystem. The caller passes --overwrite-local to commit.
-    if (blockedByLocalMod.length > 0 && !opts.overwriteLocal) {
-      // Don't write the managed block; do nothing. Throw with the list.
-      throw new UninstallError(
-        `Refusing to uninstall '${opts.skillSlug}': ${blockedByLocalMod.length} file(s) differ from the bundle (you've hand-edited them):\n  ${blockedByLocalMod.join('\n  ')}\n\nPass --overwrite-local to drop your edits, or run \`gbrain skillpack diff ${opts.skillSlug}\` to inspect first.`,
-        'locally_modified',
-      );
     }
 
     // ── Step 6: managed block rebuild ─────────────────────────────
