@@ -89,6 +89,12 @@ No schema migration. Existing brains work unchanged.
 - **`skills/brain-pdf/`** — generates publication-quality PDFs from any brain page via the gstack `make-pdf` binary. Strips frontmatter, sanitizes emoji, applies running headers + page numbers.
 - **`skills/voice-note-ingest/`** — ingests voice notes with exact-phrasing preservation (never paraphrased). 7-step decision tree routes to originals / concepts / people / companies / ideas / personal / voice-notes.
 
+#### Added (post-install advisory — v0.25.1 DX)
+
+- **`src/core/skillpack/post-install-advisory.ts`** (~209 lines). Every `gbrain init` and `gbrain post-upgrade` now ends by printing an agent-readable advisory listing the v0.25.1 recommended skills the workspace hasn't installed yet. The advisory tells the agent EXPLICITLY: ask the user before installing; print the exact `gbrain skillpack install --all` (or per-skill) command if they say yes. Renders to stderr so stdout stays clean for `--json` output. No-op when every recommended skill is already installed (no nag on repeated `gbrain upgrade` runs). Tests: `test/post-install-advisory.test.ts` (10 cases).
+  - Why this design instead of an interactive TTY prompt: gbrain users typically interact through their host agent, not the gbrain CLI directly. The agent reads command output. So the advisory is structured for agent consumption: `ACTION FOR THE AGENT` block, explicit `Ask the user explicitly`, exact commands, `Do NOT install without asking. The user owns this decision.`
+  - Wired into both `src/commands/init.ts` (PGLite + Postgres paths) and `src/commands/upgrade.ts` (`runPostUpgrade` after migrations apply).
+
 #### Added (CLI)
 
 - **`gbrain book-mirror`** — `src/commands/book-mirror.ts` (~540 lines). CLI submits N read-only subagent jobs per chapter, waits via `waitForCompletion`, reads each child's `job.result`, assembles markdown itself, writes one operator-trust `put_page` to `media/books/<slug>-personalized.md`. Cost-estimate prompt before launching; refuses to spend in non-TTY without `--yes`. Idempotency keys per chapter for retry-friendly re-runs. Partial-failure handling assembles the page with completed chapters and a `## Failed chapters` section listing retries needed.
