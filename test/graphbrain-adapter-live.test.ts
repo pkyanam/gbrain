@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Inline integration test: creates brain, seeds, tests adapter
-const BASE = "https://genres-oxide-publish-resume.trycloudflare.com";
+const BASE = process.env.GRAPH_BASE_URL || "https://graphbrain.belweave.ai";
 
 async function main() {
   // 1. Create brain + get key
@@ -119,18 +119,25 @@ async function main() {
   const counts = await engine.getBacklinkCounts(["y-combinator", "sam-altman"]);
   check(counts.get("y-combinator")! > 0, `y-combinator backlink count: ${counts.get("y-combinator")}`);
 
-  // Unsupported methods (should throw)
-  for (const [name, fn] of [
-    ["upsertChunks", () => engine.upsertChunks("x", [])],
-    ["searchVector", () => engine.searchVector(new Float32Array(0))],
-    ["executeRaw", () => engine.executeRaw("SELECT 1")],
-  ]) {
-    try { await fn(); check(false, name); } catch (e) { check(e.message.includes("not supported"), `${name} throws`); }
+  // Chunks: should succeed as no-ops (server manages chunks internally)
+  try {
+    await engine.upsertChunks("sam-altman", []);
+    check(true, "upsertChunks no-op (chunks managed server-side)");
+  } catch (e: any) {
+    check(false, `upsertChunks threw: ${e.message}`);
   }
 
-  console.log(`\n${"═".repeat(40)}`);
+  // Methods that genuinely should throw (not supported on Neo4j backend)
+  for (const [name, fn] of [
+    ["searchVector", () => engine.searchVector(new Float32Array(0))],
+    ["executeRaw", () => engine.executeRaw("SELECT 1")],
+  ] as const) {
+    try { await fn(); check(false, name); } catch (e: any) { check(e.message.includes("not supported"), `${name} throws`); }
+  }
+
+  console.log(`\n${"=".repeat(40)}`);
   console.log(` ${ok} passed, ${fail} failed`);
-  console.log(`${"═".repeat(40)}`);
+  console.log(`${"=".repeat(40)}`);
   process.exit(fail > 0 ? 1 : 0);
 }
 
