@@ -591,6 +591,40 @@ For single long-running queries, use `startHeartbeat(reporter, note)` with a
 try/finally to guarantee cleanup. Never call `process.stdout.write('\r...')`
 in bulk paths, the CI guard will fail the build.
 
+## Capturing test output (NEVER pipe through `tail` / `head`)
+
+**Iron rule:** when running `bun test`, `bun run test:e2e`, `bun run typecheck`,
+or any other test/check command, redirect to a file FIRST, then `tail` the file
+separately:
+
+```bash
+# RIGHT — full output preserved, real exit code visible
+bun test > /tmp/ship_units.txt 2>&1
+echo "EXIT=$?"
+tail -50 /tmp/ship_units.txt
+grep -E '(fail\)|✗|error:' /tmp/ship_units.txt | head -30
+```
+
+```bash
+# WRONG — exit code is `tail`'s (always 0), failures truncated, ship gates fail open
+bun test 2>&1 | tail -10
+```
+
+The pipe form silently breaks /ship Step T1 (test failure ownership triage) and
+the test verification gate (Step 16) because:
+- `$?` after a pipe is the LAST command's exit code (`tail` → 0), not bun's
+- bun prints failure details before the summary line, so `tail -N` drops them
+- Step T1 needs the full failure list to classify in-branch vs pre-existing
+
+This bit us during v0.26.2 ship: `bun test 2>&1 | tail -10` reported "3911 pass / 23 fail"
+but no failure details survived, forcing a 23-minute re-run to triage.
+
+Apply the same pattern to any long-running command whose exit code matters:
+`bun run typecheck`, `bun run ci:local`, migration runs, eval suites, etc.
+For background tasks (`run_in_background: true`), the harness captures the exit
+file separately — use it via the bg task's `<id>.exit` file, not the streamed
+output.
+
 ## Build
 
 `bun build --compile --outfile bin/gbrain src/cli.ts`
